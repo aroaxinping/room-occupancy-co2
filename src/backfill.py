@@ -187,9 +187,11 @@ RECENT_DAYS = 1
 # What the old unconditional window was, kept only so every run can report what
 # it saved against it.
 OLD_WINDOW_DAYS = 4
-# The record starts here; nothing earlier exists to ask for, so the planner
-# clamps to it rather than retrying dates that will always come back empty.
-EARLIEST = "20260329"
+# How far back the planner reaches when there are no partitions to infer it
+# from. Deliberately a duration rather than a literal date: the first day of the
+# record is a fact about the occupant, and this repository does not carry those
+# (see the README). With partitions present the bound is read from them.
+FALLBACK_LOOKBACK_DAYS = 550
 
 # --- the ledger -----------------------------------------------------------
 STATE_PATH = paths.DATA_DIR / "backfill_state.json"
@@ -387,7 +389,17 @@ def due_sweep(state: dict, today: date, every: int = None) -> bool:
 
 
 def earliest_date() -> date:
-    return pd.Timestamp(EARLIEST).date()
+    """The earliest day worth asking for.
+
+    Taken from the partitions on disk so the bound comes from the data rather
+    than from a constant in the source. Asking earlier than the record starts
+    costs an empty response, not a wrong answer, so the fallback is generous.
+    """
+    days = sorted(p.parent.name.removeprefix("date=")
+                  for p in (paths.DATA_DIR / "live").glob("date=*/readings.parquet"))
+    if days:
+        return date.fromisoformat(days[0])
+    return date.today() - timedelta(days=FALLBACK_LOOKBACK_DAYS)
 
 
 def plan_days(state: dict, today: date, recent_days: int = None,
@@ -639,7 +651,7 @@ def main() -> int:
     if args.all:
         # Deliberately blind to the ledger: --all means "ask for everything",
         # and it is the escape hatch for when the ledger is not to be trusted.
-        start, end = pd.Timestamp(EARLIEST).date(), today
+        start, end = earliest_date(), today
         plan = {start + timedelta(days=i): "all"
                 for i in range((end - start).days + 1)}
         print(f"fetching everything from {start} to {end}")

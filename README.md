@@ -195,10 +195,34 @@ is robust even though the precision is not.
 a decay in a room known to be empty, where the equation does not contain `G` at
 all -- an occupancy step of one person raises the equilibrium by a predictable
 amount, and inverting that gives **17 +/- 3 L/h** for this room's occupant
-against the 18 the model assumes. `src/generation.py` derives the expected
-figure from Schofield's BMR equations, an activity multiplier, and the oxygen
-energy equivalent, and reproduces the tabulated 18 L/h for an adult at desk
-work, which is what makes the comparison meaningful rather than circular.
+against the 18 the model assumes.
+
+For that comparison to mean anything the predicted side has to be right too, so
+`src/generation.py` was checked against its source. It had built the figure from
+first principles -- Schofield's BMR equations, an activity multiplier, an oxygen
+energy equivalent, a respiratory quotient -- and three of those four links were
+the paper's own. The fourth was not. It used 20.9 kJ per litre of O2, which is
+the energy equivalent at a respiratory quotient near 0.96, while applying
+RQ = 0.85 two lines later: internally inconsistent, and a uniform **2.7%
+underestimate** of CO2 output. Separately, `steady_state_ppm` compared rates
+published at 273 K against a room volume at room temperature. ppm is a volume
+fraction, so both volumes have to be at the same conditions, and that
+understated concentrations by a further **7.4%**. Between them the two
+corrections raise predicted steady-state ppm by about 10%.
+
+The module is now the paper's Equation 8, with its Equation 10 for temperature
+and pressure; `tests/test_generation.py` holds 43 tests asserting published
+values, including every adult cell of its Table 4 and both of its worked
+examples; `docs/generation-rate.md` records the comparison. At room temperature
+the corrected module gives 14-21 L/h for an adult at desk work across 55-95 kg,
+which brackets both the assumed 18 and the measured 17 +/- 3.
+
+None of that moves the numbers above. `src/generation.py` is not in the
+inversion path -- `src/occupancy.py` and `src/states.py` carry `G` as their own
+constant -- so the sensitivity table is unchanged by the correction. What
+changed is that the figure the measurement is checked against is now traceable
+to a published source rather than to a derivation this repository did itself and
+got wrong.
 
 And the inverse question is settled in the negative, now quantitatively. Running this model backwards
 to infer an occupant's sex or body mass cannot work: a sedentary woman and a
@@ -222,11 +246,19 @@ That is a property of the estimator, not of the room, and it has not been fixed.
 
 **Weekday/weekend discrimination fails.** The model's ranking of which days hold two
 people contradicts the occupant's own account. This is not fixable by tuning without overfitting to a verbal account,
-and is the reason the next step is labels rather than parameters.
+and is the reason the next step is labels rather than parameters. `src/label.py`
+records occupancy state changes as they happen and the first entries now exist,
+which is enough to exercise the path from label to score and nowhere near enough
+to settle this.
 
 **Counting is not validated.** The estimate is a continuous quantity that
 tracks occupancy well in aggregate. Claiming accuracy at "1 vs 2 people" needs
-ground truth that does not yet exist.
+ground truth, which is now being collected rather than simply absent: labels
+from `src/label.py` for the real room, and `src/simulate.py`, which integrates
+the same mass balance forward from a known schedule and measures what the
+pipeline recovers. The simulator bounds the error from estimation only -- it
+assumes the physics the model assumes -- and neither source has yet produced
+enough hours to put a number on 1 versus 2.
 
 ## Repairing the record
 
@@ -236,6 +268,34 @@ poll under-covered and merges what the cloud holds. The first run recovered
 124,363 rows at one-minute resolution with no gap longer than six hours across
 three months -- including both multi-week holes that the original export had,
 which had been treated as permanent since the start of the project.
+
+That repair now runs daily, and the interesting part of the second version is
+what it declines to fetch. The first re-fetched a fixed rolling window every
+run: about 5,726 rows to add nothing on an ordinary morning. The obvious fix is
+a watermark over the newest timestamp seen, and here that is not merely
+wasteful but silently destructive. The cloud holds only what the phone has
+uploaded, and that upload happens when someone opens the device's history screen
+with Bluetooth in range, so a day is routinely sparse when first asked for and
+complete later. A watermark advances past such a day on the strength of the
+clock alone and never looks at it again -- which is exactly the shape of the two
+26-day holes this project has been repairing since the start.
+
+So what is tracked is a per-day ledger rather than a high-water mark, and a day
+leaves the fetch plan only on evidence about the data itself. It can leave by
+one of two doors: it came back with 99% of its 288 five-minute bins covered, so
+there is no hole left that a later fetch could repair; or it came back the same
+size twice running while already at least half dense, which is the case for days
+the cloud genuinely never had. Any growth resets that streak, a day thinner than
+half dense cannot use the second door at all -- "stably thin" is what an
+un-uploaded day looks like -- and neither door can be opened by time passing.
+Completeness is counted in bins rather than rows because the device's interval
+drifts either side of a minute, so a complete day is anywhere from ~1,340 to
+~1,400 rows and no row target separates "complete" from "nearly". A re-window
+every week ignores the ledger entirely across the preceding ten days, so a day
+wrongly retired stays retired for at most a week, and days past the vendor's
+retention that never came back dense are printed every run rather than dropped.
+Replaying the policy over the partitions already on disk, an ordinary run falls
+from 5,726 rows to **1,652**.
 
 Retention is finite: the cloud served roughly three months for this account,
 not the full five, so the original export remains the only copy of the earliest
@@ -287,14 +347,18 @@ src/ventilation.py  per-episode decay fits, regularised k(t)
 src/occupancy.py    mass-balance inversion and episode detection
 src/states.py       Viterbi decoding over {0, 1, 2} occupants  <- the model that works
 src/joint.py        joint occupancy x ventilation decoding (documented failure)
+src/generation.py   CO2 output per person from body size and activity
 ```
+
+`docs/generation-rate.md` records how `src/generation.py` was checked against
+the paper it implements, and what that check found.
 
 And the collection side:
 
 ```
 src/ingest.py       vendor API polling, credentials from the Keychain
-src/pipeline.py     scheduled poll, partitioned writes, staleness report
-src/backfill.py     repairing gaps from the vendor's stored history
+src/pipeline.py     scheduled poll, partitioned writes, staleness and bin coverage
+src/backfill.py     repairing gaps from the vendor's stored history, on a ledger
 src/label.py        recording real occupancy, so the estimate can be scored
 src/simulate.py     a synthetic room, to measure what the real one cannot
 install-scheduler.sh + scheduler.plist.template   launchd agent
@@ -386,3 +450,5 @@ building occupants. *Indoor Air*, 27(5), 868-879.
 https://doi.org/10.1111/ina.12383 -- CO2 output as a function of occupant sex,
 age, body mass and activity, superseding the decades-old fixed rates. Source of
 the generation-rate range used in the sensitivity analysis above.
+`src/generation.py` implements its Equation 8, `tests/test_generation.py`
+asserts its published values, and `docs/generation-rate.md` records the check.
