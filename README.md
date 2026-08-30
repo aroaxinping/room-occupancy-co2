@@ -110,6 +110,30 @@ when the room was both empty and closed, and they do not describe occupied
 hours. A two-level ventilation model built from the wrong half of the
 distribution was never going to work.
 
+## Ventilation, measured rather than assumed
+
+Every earlier number for `k` was inferred from the shape of decay curves with
+occupancy unknown. A session of live readings with occupancy recorded as it
+changed pins three regimes directly:
+
+**This section is currently withdrawn.** The figures it reported were computed
+against backfilled timestamps that carried a two-hour offset, so each window
+analysed was not the window it was labelled with: an interval recorded as the
+occupied morning was in fact the two hours before anyone arrived. The
+conclusions may well survive re-measurement, but they are not evidence until
+they have been recomputed, and leaving them in place while that is pending
+would be reporting a result the data does not support.
+
+The cause is documented in `src/backfill.py`: the vendor's client formats each
+point in local wall-clock time with no offset attached, and the ingestion
+labelled those strings UTC. Reading them that way is natural and wrong, and it
+is invisible until a timestamp lands in the future. The module now localises
+before converting, and refuses any fetch whose newest reading is ahead of now.
+
+What still stands, because it never depended on the backfill: the sealed rate
+of 0.39 from five months of overnight decays, and the steady-state inversion in
+the joint-decoding section that put occupied hours near 1.05 ACH.
+
 ## Validation without labels
 
 There is no ground truth for occupancy, so the model is checked against periods
@@ -167,19 +191,34 @@ Two things follow. The qualitative conclusions hold across the whole range --
 an empty room reads 0.07-0.25 and an occupied one 0.63-1.17 -- so the ordering
 is robust even though the precision is not.
 
-And the inverse question is settled in the negative. Running this model backwards
+`G` is no longer only an assumption. With ventilation measured independently --
+a decay in a room known to be empty, where the equation does not contain `G` at
+all -- an occupancy step of one person raises the equilibrium by a predictable
+amount, and inverting that gives **17 +/- 3 L/h** for this room's occupant
+against the 18 the model assumes. `src/generation.py` derives the expected
+figure from Schofield's BMR equations, an activity multiplier, and the oxygen
+energy equivalent, and reproduces the tabulated 18 L/h for an adult at desk
+work, which is what makes the comparison meaningful rather than circular.
+
+And the inverse question is settled in the negative, now quantitatively. Running this model backwards
 to infer an occupant's sex or body mass cannot work: a sedentary woman and a
 lightly active man produce near-identical readings, because activity level
 swings CO2 output by ~100% while sex and body mass account for 20-35%. The
-confounder is larger than the signal. This is the same identifiability problem
-as `k` versus `N`, and no amount of extra data from this one sensor resolves it.
+confounder is larger than the signal. Across the same generation model: holding
+the person fixed and varying activity spans a factor of **2.00**, while holding
+activity fixed and varying sex and body mass across 55-95 kg spans **1.52**. The
+measured 17 +/- 3 L/h is consistent with twenty-one different combinations of
+sex, mass and activity. This is the same identifiability problem as `k` versus
+`N`, and no amount of extra data from this one sensor resolves it.
 
 ## Open problems
 
 **The night residual.** 0.26 people at 4 a.m. in a room known to be empty. It
-survived both the `C_out` and the `k` corrections, so it is not ventilation.
-Current hypothesis: CO2-laden air from the rest of the home, which the mass
-balance cannot distinguish from a person.
+survived both the `C_out` and the `k` corrections. Simulation later supplied a
+mechanism: `estimate_c_out` is biased 20 to 34 ppm low through 22:00-04:00 even
+with occupancy held at zero, because a low quantile of a neighbourhood spanning
+a rising signal lands near that neighbourhood's floor rather than at its centre.
+That is a property of the estimator, not of the room, and it has not been fixed.
 
 **Weekday/weekend discrimination fails.** The model's ranking of which days hold two
 people contradicts the occupant's own account. This is not fixable by tuning without overfitting to a verbal account,
@@ -188,6 +227,22 @@ and is the reason the next step is labels rather than parameters.
 **Counting is not validated.** The estimate is a continuous quantity that
 tracks occupancy well in aggregate. Claiming accuracy at "1 vs 2 people" needs
 ground truth that does not yet exist.
+
+## Repairing the record
+
+The collector is no longer the only source. The vendor's own history is
+reachable through a private-API client, so `src/backfill.py` finds days the
+poll under-covered and merges what the cloud holds. The first run recovered
+124,363 rows at one-minute resolution with no gap longer than six hours across
+three months -- including both multi-week holes that the original export had,
+which had been treated as permanent since the start of the project.
+
+Retention is finite: the cloud served roughly three months for this account,
+not the full five, so the original export remains the only copy of the earliest
+period. The poll
+also stays primary, because it depends on nothing but this machine. But an hour
+the collector misses is now repairable rather than lost, which was the
+architecture's weakest assumption.
 
 ## The collector
 
@@ -237,9 +292,11 @@ src/joint.py        joint occupancy x ventilation decoding (documented failure)
 And the collection side:
 
 ```
-src/ingest.py       SwitchBot API polling, credentials from the Keychain
+src/ingest.py       vendor API polling, credentials from the Keychain
 src/pipeline.py     scheduled poll, partitioned writes, staleness report
+src/backfill.py     repairing gaps from the vendor's stored history
 src/label.py        recording real occupancy, so the estimate can be scored
+src/simulate.py     a synthetic room, to measure what the real one cannot
 install-scheduler.sh + scheduler.plist.template   launchd agent
 ```
 
@@ -248,7 +305,14 @@ broke and the audits that caught them, in the order it happened.
 
 ## Reproducing this
 
-`pip install -r requirements.txt`. The sensor readings are not in the
+`pip install -r requirements.txt`. `src/backfill.py` additionally needs a
+private-API client that is deliberately *not* listed there: it takes an account
+email and password rather than a scoped token, so a compromise of it is a
+compromise of the whole account, and it is worth installing consciously and
+pinned to a commit rather than pulled in by a blanket install. Every other
+module works without it.
+
+The sensor readings are not in the
 repository and cannot be, so the notebooks need a directory of their own data;
 `src/paths.py` says where it is looked for, and `ROOM_OCCUPANCY_DATA` overrides
 it. Everything here runs against any CO2 series with the same columns.

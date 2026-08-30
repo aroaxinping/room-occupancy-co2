@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Daily repair of whatever the five-minute poll missed. Install with:
+
+      ./install-backfill.sh
+
+  Runs once a day rather than continuously: the vendor's history is the same
+  whenever it is asked for, so polling it often buys nothing and spends
+  someone else's capacity. Scheduled for the small hours, when the room is
+  usually quiet and a slow request costs nothing.
+
+  Credentials are not here; the job reads them from the Keychain.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>          <string>com.local.room-occupancy-backfill</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__REPO__/src/backfill.py</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>   <integer>5</integer>
+        <key>Minute</key> <integer>30</integer>
+    </dict>
+    <!-- If the machine was asleep at 05:30, launchd runs the job on wake
+         rather than skipping the day, which is the whole point of using it
+         over cron for a once-daily repair. -->
+    <key>RunAtLoad</key>      <false/>
+    <key>StandardOutPath</key>   <string>__DATA__/logs/backfill.out</string>
+    <key>StandardErrorPath</key> <string>__DATA__/logs/backfill.err</string>
+    <key>ProcessType</key>    <string>Background</string>
+</dict>
+</plist>

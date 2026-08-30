@@ -2,6 +2,8 @@
 # defence in depth for anything copied back in by hand.
 data/
 logs/
+# any quarantined or partitioned reading store, whatever it is named
+live*/
 *.parquet
 *.csv
 *.jsonl
