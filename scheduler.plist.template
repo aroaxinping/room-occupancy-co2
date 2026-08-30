@@ -10,8 +10,13 @@
   after the fact.
 
   No credentials appear here (the poller reads them from the Keychain), and
-  the deviceId is substituted at install time, so this template stays free of
+  the deviceIds are substituted at install time, so this template stays free of
   anything identifying.
+
+  One agent polls both sensors: src/pipeline.py takes a bare deviceId for the
+  CO2 meter and slug=deviceId for any other device, and a failure on one does
+  not cost the other its reading. A second agent would double the wake-ups to
+  no purpose.
 -->
 <plist version="1.0">
 <dict>
@@ -21,6 +26,7 @@
         <string>__PYTHON__</string>
         <string>__REPO__/src/pipeline.py</string>
         <string>__DEVICE_ID__</string>
+__EXTRA_TARGETS__
     </array>
     <key>StartInterval</key>  <integer>300</integer>
     <key>RunAtLoad</key>      <true/>

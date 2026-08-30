@@ -20,10 +20,35 @@ token. A compromise of the client library is a compromise of the whole account,
 including device control. It is imported lazily and left out of
 requirements.txt for that reason -- nothing else here depends on it.
 
-    python3 src/backfill.py            incremental refresh (the daily job)
-    python3 src/backfill.py --plan     what that run would fetch, without network
-    python3 src/backfill.py --gaps     repair only days below the coverage threshold
-    python3 src/backfill.py --all      re-fetch everything the cloud holds
+    python3 src/backfill.py                  incremental refresh (the daily job)
+    python3 src/backfill.py --plan           what that run would fetch, no network
+    python3 src/backfill.py --gaps           repair days below the coverage threshold
+    python3 src/backfill.py --all            re-fetch everything the cloud holds
+    python3 src/backfill.py --device rack    restrict any of the above to one sensor
+    python3 src/backfill.py --migrate-state  upgrade the ledger to v2 (see below)
+    python3 src/backfill.py --revert-state   undo that, from the backup it kept
+
+Two devices, two endpoints
+--------------------------
+Both sensors in the room are repaired from the cloud, and the vendor serves
+them from different endpoints with different payloads:
+
+    meterpro-co2   get_meter_pro_history(mac, start_date, end_date, ...)
+                   -> {"timestamp", "temperature_c", "humidity_pct", "co2_ppm"}
+    rack           get_sensor_history(mac, start_date, end_date, ...)
+                   -> {"timestamp", "temperature_c", "humidity_pct"}
+
+`get_sensor_history` carries no CO2 for any device -- that is a property of the
+endpoint, not of the hardware -- so the rack's frame has two channels and the
+CO2 meter's has three. Both go through the same timestamp handling, because
+both are formatted by the same code in the client and both are wrong in the
+same way if read naively (see "On the vendor's timestamps").
+
+Each device is planned, fetched, merged and recorded separately, in its own
+partition tree (src/pipeline.py explains why they are separate) against its own
+ledger. A failure on one device is caught and reported, and the next device
+still runs: the CO2 series is the only one that cannot be reconstructed from
+anything else, so a newly added sensor must never be able to cost it a repair.
 
 Incremental, and why the obvious way to do it is wrong
 ------------------------------------------------------
@@ -132,6 +157,38 @@ ledger being right. Requests drop from one a day to one a day (the plan is
 coalesced into contiguous ranges, so it stays a single call in the normal case)
 while the rows on the wire fall by two thirds.
 
+One ledger per device, and why not one shared one
+--------------------------------------------------
+The ledger is per (device, day), not per day. The two sensors upload
+independently -- different BLE sessions, different endpoints, different
+retention -- so a day is routinely complete for one and thin for the other, and
+a single per-day record could only hold one of those two facts. Whichever
+convention it took would be wrong: "settled when both are settled" keeps
+re-fetching a CO2 day that has nothing left to repair, and "settled when either
+is" retires the rack's holes on the strength of the CO2 meter's completeness,
+which is precisely the silent-hole failure this module exists to prevent. The
+completeness thresholds are per-device quantities too -- `COMPLETE_BINS` is
+counted against a device's own partitions -- so sharing a record would also
+mean sharing a denominator that does not apply.
+
+So the state file is versioned to 2 and nests the v1 shape under a device key:
+
+    {"version": 2,
+     "devices": {"meterpro-co2": {"last_sweep": ..., "days": {...}},
+                 "rack":         {"last_sweep": ..., "days": {...}}}}
+
+`last_sweep` is per device for the same reason: the periodic re-window is a
+statement about one device's fetch history.
+
+A v1 file is the CO2 meter's ledger, because that was the only device when it
+was written, so the upgrade is a pure move of `days` and `last_sweep` under
+`devices["meterpro-co2"]`. `upgrade_state()` does that and is idempotent -- a
+v2 file passes through unchanged -- and `load_state()` applies it in memory so
+an ordinary run never loses a streak. `--migrate-state` writes the upgraded
+file back after copying the original to `backfill_state.v1.bak.json`, and
+`--revert-state` restores that copy; neither deletes anything, and running
+either twice is a no-op.
+
 Where the state lives, and why JSON
 -----------------------------------
 `DATA_DIR/backfill_state.json`, never inside the repository -- the ledger says
@@ -151,10 +208,18 @@ file -- and, worse, one that happens to parse as "everything is settled".
 On the vendor's timestamps
 --------------------------
 The client formats each point in LOCAL wall-clock time with no offset attached;
-`fetch()` localises before converting to UTC. Labelling those strings UTC reads
-naturally and is wrong by the local offset -- that was a real two-hour bug, and
-`fetch()` still refuses any response whose newest reading lands in the future,
-which is how it was caught.
+`frame_from_rows()` localises before converting to UTC. Labelling those strings
+UTC reads naturally and is wrong by the local offset -- that was a real
+two-hour bug, and the same function still refuses any response whose newest
+reading lands in the future, which is how it was caught.
+
+This is not specific to the Meter Pro endpoint. Every history method in the
+client formats its points the same way -- `datetime.fromtimestamp(dd,
+tz=utc).astimezone().strftime(...)`, which drops the offset it just applied --
+so `get_sensor_history` returns exactly the same trap for the rack sensor. Both
+devices therefore share one parsing function rather than each having its own:
+the localise-then-convert step and the future guard are written once, and a
+third device cannot be added with a fresh copy of the bug.
 
 The vendor only serves what the phone app has uploaded, and that upload happens
 when someone opens the device's history screen with Bluetooth connected. An
@@ -164,15 +229,17 @@ failed.
 import argparse
 import json
 import os
+import shutil
 import sys
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 
 import paths
-from ingest import _credential
-from pipeline import (CADENCE_MINUTES, bins_covered, coverage, partition_for,
-                      partition_stats)
+from ingest import (DEFAULT_DEVICE, DEVICES, METER_PRO_CO2, _credential,
+                    device_for)
+from pipeline import (CADENCE_MINUTES, bins_covered, coverage, device_root,
+                      partition_for, partition_stats)
 
 COVERAGE_THRESHOLD = 0.90
 # How far back the open tail reaches: these days are fetched every run whatever
@@ -195,7 +262,10 @@ FALLBACK_LOOKBACK_DAYS = 550
 
 # --- the ledger -----------------------------------------------------------
 STATE_PATH = paths.DATA_DIR / "backfill_state.json"
-STATE_VERSION = 1
+STATE_VERSION = 2
+# Where --migrate-state parks the v1 file, and where --revert-state looks for
+# it. A copy, never a move: nothing under DATA_DIR is deleted by either.
+STATE_BACKUP_PATH = paths.DATA_DIR / "backfill_state.v1.bak.json"
 # The vendor's history is one-minute, so a full day is this many rows.
 VENDOR_CADENCE_MINUTES = 1
 EXPECTED_VENDOR_ROWS = 24 * 60 // VENDOR_CADENCE_MINUTES
@@ -246,12 +316,68 @@ def _complete(bins) -> bool:
     return (bins or 0) >= COMPLETE_BINS * EXPECTED_BINS
 
 
+def empty_device_state() -> dict:
+    """One device's ledger: the whole of what v1 used to hold at top level."""
+    return {"last_sweep": None, "days": {}}
+
+
 def empty_state() -> dict:
-    return {"version": STATE_VERSION, "last_sweep": None, "days": {}}
+    return {"version": STATE_VERSION,
+            "devices": {slug: empty_device_state() for slug in DEVICES}}
 
 
-def seed_state(stats: dict, today: date) -> dict:
-    """Bootstrap a ledger from the partitions already on disk.
+def state_for(state: dict, device=DEFAULT_DEVICE) -> dict:
+    """The per-device sub-ledger, created on first use.
+
+    Every pure function below still takes something shaped like the v1 state --
+    a dict with "days" and "last_sweep" -- so the per-device split cost them no
+    signature change and no new branch.
+    """
+    slug = device_for(device).slug
+    return state.setdefault("devices", {}).setdefault(slug, empty_device_state())
+
+
+def upgrade_state(state: dict) -> dict:
+    """v1 -> v2, idempotently. Pure: no disk, no clock.
+
+    A v1 file predates the second sensor, so its days are the CO2 meter's by
+    definition and move under that key unchanged. A v2 file is returned as it
+    came in, which is what makes running the migration twice a no-op. Anything
+    unrecognisable returns None so the caller can fall back to re-seeding
+    rather than build a ledger on a guess.
+    """
+    if not isinstance(state, dict):
+        return None
+    version = state.get("version")
+    if version == 2 and isinstance(state.get("devices"), dict):
+        for slug in DEVICES:
+            state["devices"].setdefault(slug, empty_device_state())
+        return state
+    if version == 1 and isinstance(state.get("days"), dict):
+        upgraded = empty_state()
+        upgraded["devices"][DEFAULT_DEVICE.slug] = {
+            "last_sweep": state.get("last_sweep"),
+            "days": state["days"],
+        }
+        return upgraded
+    return None
+
+
+def downgrade_state(state: dict) -> dict:
+    """v2 -> v1, keeping only the CO2 meter -- the reverse of the above.
+
+    Lossy by construction: v1 has nowhere to put a second device. That is why
+    --migrate-state keeps a copy of the original file rather than relying on
+    this, and why --revert-state prefers the copy; this exists so the shape
+    change is reversible in principle as well as in practice.
+    """
+    device = state_for(state, DEFAULT_DEVICE)
+    return {"version": 1, "last_sweep": device.get("last_sweep"),
+            "days": device.get("days", {})}
+
+
+def seed_device_state(stats: dict, today: date) -> dict:
+    """Bootstrap one device's ledger from the partitions already on disk.
 
     Without this, the first incremental run would treat every day as unknown
     and re-fetch the whole lookback window. A partition that is already dense
@@ -261,7 +387,7 @@ def seed_state(stats: dict, today: date) -> dict:
     rows is a day the five-minute poll covered on its own while the cloud still
     holds it at one-minute resolution, which is worth asking for.
     """
-    state = empty_state()
+    state = empty_device_state()
     for day, stat in stats.items():
         d = day if isinstance(day, date) else pd.Timestamp(day).date()
         rows, bins = stat["rows"], stat["bins"]
@@ -281,6 +407,28 @@ def seed_state(stats: dict, today: date) -> dict:
     return state
 
 
+def seed_state(today: date, devices=None) -> dict:
+    """A whole v2 ledger seeded from each device's own partitions."""
+    state = empty_state()
+    for device in (devices or DEVICES.values()):
+        device = device_for(device)
+        state["devices"][device.slug] = seed_device_state(
+            partition_stats(device), today)
+    return state
+
+
+def read_state_file(path=STATE_PATH) -> dict:
+    """The parsed file, or None if it is missing, truncated or unreadable."""
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"backfill ledger unreadable ({exc}); rebuilding it, so this run "
+              f"fetches more than usual", file=sys.stderr)
+        return None
+
+
 def load_state(path=STATE_PATH, today: date = None) -> dict:
     """Read the ledger, degrading to "nothing is settled" on any doubt.
 
@@ -288,21 +436,26 @@ def load_state(path=STATE_PATH, today: date = None) -> dict:
     build does not understand -- resolves towards fetching more rather than
     less. The cost of being wrong in that direction is bandwidth; the cost of
     being wrong in the other is a permanent hole.
+
+    A v1 file is the one case that is *not* doubt: it is a well-formed ledger
+    for the CO2 meter written before the rack sensor existed, so it is upgraded
+    in memory rather than thrown away. A copy of the original is kept first, so
+    that the ordinary run which then writes v2 back cannot be the thing that
+    loses it, and --revert-state has something to restore.
     """
     today = today or datetime.now(timezone.utc).date()
-    try:
-        state = json.loads(path.read_text())
-    except FileNotFoundError:
-        return seed_state(partition_stats(), today)
-    except (json.JSONDecodeError, OSError) as exc:
-        print(f"backfill ledger unreadable ({exc}); rebuilding it, so this run "
-              f"fetches more than usual", file=sys.stderr)
-        return seed_state(partition_stats(), today)
-    if state.get("version") != STATE_VERSION or not isinstance(state.get("days"), dict):
-        print(f"backfill ledger is version {state.get('version')!r}, not "
+    raw = read_state_file(path)
+    if raw is None:
+        return seed_state(today)
+    if raw.get("version") == 1:
+        _backup_v1(path)
+        print("backfill ledger is v1 (one device); upgrading it in memory. "
+              "Run --migrate-state to write it back in v2 form.", file=sys.stderr)
+    state = upgrade_state(raw)
+    if state is None:
+        print(f"backfill ledger is version {raw.get('version')!r}, not "
               f"{STATE_VERSION}; rebuilding it", file=sys.stderr)
-        return seed_state(partition_stats(), today)
-    state.setdefault("last_sweep", None)
+        return seed_state(today)
     return state
 
 
@@ -312,6 +465,66 @@ def save_state(state: dict, path=STATE_PATH) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(state, indent=1, sort_keys=True))
     os.replace(tmp, path)
+
+
+def _backup_v1(path=STATE_PATH, backup=STATE_BACKUP_PATH) -> bool:
+    """Copy a v1 ledger aside, once. Never overwrites an existing backup."""
+    if backup.exists() or not path.exists():
+        return False
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, backup)
+    return True
+
+
+def migrate_state(path=STATE_PATH, backup=STATE_BACKUP_PATH) -> int:
+    """Write the ledger back in v2 form, keeping the original beside it.
+
+    Idempotent: on an already-v2 file nothing is written and nothing is backed
+    up. Reversible: --revert-state puts the copy back. Non-destructive: the
+    original is copied, never moved, and no partition is touched -- the
+    partition layout needs no migration at all, which is the point of giving
+    each device its own tree (see src/pipeline.py).
+    """
+    raw = read_state_file(path)
+    if raw is None:
+        print(f"no ledger at {path}; nothing to migrate. The next run will "
+              f"seed one from the partitions on disk.")
+        return 0
+    if raw.get("version") == STATE_VERSION:
+        print(f"ledger is already v{STATE_VERSION}; nothing to do")
+        return 0
+    upgraded = upgrade_state(raw)
+    if upgraded is None:
+        print(f"ledger is version {raw.get('version')!r} and this build cannot "
+              f"upgrade it; leave it alone and let a run re-seed from the "
+              f"partitions instead", file=sys.stderr)
+        return 1
+    _backup_v1(path, backup)
+    save_state(upgraded, path)
+    print(f"ledger upgraded v{raw.get('version')} -> v{STATE_VERSION}\n"
+          f"  original copied to {backup}\n"
+          f"  devices: {', '.join(sorted(upgraded['devices']))}\n"
+          f"  undo with: python3 src/backfill.py --revert-state")
+    return 0
+
+
+def revert_state(path=STATE_PATH, backup=STATE_BACKUP_PATH) -> int:
+    """Restore the pre-migration ledger from the copy migrate_state kept.
+
+    The current file is copied aside first, so reverting is itself reversible
+    and neither direction deletes anything under DATA_DIR.
+    """
+    if not backup.exists():
+        print(f"no backup at {backup}; nothing to revert to. A ledger can "
+              f"always be rebuilt with --reset-state", file=sys.stderr)
+        return 1
+    if path.exists():
+        aside = path.with_name(f"backfill_state.v{STATE_VERSION}.bak.json")
+        shutil.copy2(path, aside)
+        print(f"  current ledger copied to {aside}")
+    shutil.copy2(backup, path)
+    print(f"ledger restored from {backup}")
+    return 0
 
 
 def is_settled(record: dict, day: date, today: date) -> bool:
@@ -350,21 +563,25 @@ def record_fetch(state: dict, day: date, rows: int, bins: int = 0,
     return record
 
 
-def stale_days(state: dict, today: date) -> list:
+def stale_days(state: dict, today: date, device=DEFAULT_DEVICE) -> list:
     """Days that never came back dense and are now past automatic retry.
 
     Reported every run rather than dropped. Most are simply older than the
     vendor's retention, where retrying cannot help -- but the failure has to
     stay visible, because an invisible gap is the thing this module exists to
     prevent.
+
+    `state` is one device's sub-ledger, and `device` only bounds the report at
+    the start of that device's own record.
     """
     out = []
+    earliest = earliest_date(device)
     for key, record in state["days"].items():
         try:
             day = date.fromisoformat(key)
         except ValueError:
             continue
-        if (today - day).days <= LOOKBACK_DAYS or day < earliest_date():
+        if (today - day).days <= LOOKBACK_DAYS or day < earliest:
             continue
         if not _dense(record.get("fetched_rows")):
             out.append((day, record.get("fetched_rows") or 0))
@@ -388,29 +605,49 @@ def due_sweep(state: dict, today: date, every: int = None) -> bool:
         return True
 
 
-def earliest_date() -> date:
-    """The earliest day worth asking for.
+def _tree_earliest(device) -> date:
+    days = sorted(p.parent.name.removeprefix("date=")
+                  for p in device_root(device).glob("date=*/readings.parquet"))
+    return date.fromisoformat(days[0]) if days else None
+
+
+def earliest_date(device=DEFAULT_DEVICE) -> date:
+    """The earliest day worth asking for, for one device.
 
     Taken from the partitions on disk so the bound comes from the data rather
     than from a constant in the source. Asking earlier than the record starts
     costs an empty response, not a wrong answer, so the fallback is generous.
+
+    A device with no partitions yet -- which is exactly the rack sensor on the
+    day it is added -- falls back to the earliest day any device has, rather
+    than straight to the duration below. The room's record began when it began;
+    a second sensor cannot have readings older than the first partition on this
+    machine, and asking 550 days back for a device whose tree is empty would
+    make its first --all a request for a year and a half of nothing.
     """
-    days = sorted(p.parent.name.removeprefix("date=")
-                  for p in (paths.DATA_DIR / "live").glob("date=*/readings.parquet"))
-    if days:
-        return date.fromisoformat(days[0])
+    own = _tree_earliest(device)
+    if own:
+        return own
+    others = [d for d in (_tree_earliest(dev) for dev in DEVICES.values()) if d]
+    if others:
+        return min(others)
     return date.today() - timedelta(days=FALLBACK_LOOKBACK_DAYS)
 
 
 def plan_days(state: dict, today: date, recent_days: int = None,
-              sweep: bool = False, gap_days=None, earliest: date = None) -> dict:
+              sweep: bool = False, gap_days=None, earliest: date = None,
+              device=DEFAULT_DEVICE) -> dict:
     """Which days to ask for, and why. Pure: no network, no clock, no disk.
 
     Returns {date: reason}. The reasons are printed by --plan, because a
     scheduled job that cannot explain its own decisions is how the last set of
     holes went unnoticed for 26 days.
+
+    `state` is one device's sub-ledger (`state_for(state, device)`), so the
+    policy below is unchanged from the single-device version: it simply runs
+    once per device over that device's own history.
     """
-    earliest = earliest or earliest_date()
+    earliest = earliest or earliest_date(device)
     recent_days = RECENT_DAYS if recent_days is None else recent_days
     plan = {}
 
@@ -499,33 +736,59 @@ def _client():
     return client
 
 
-def _co2_device(client) -> dict:
-    for device in client.list_devices():
-        if "MeterPro" in str(device.get("device_type", "")) or \
-           "W1079001" == device.get("device_type"):
-            return device
-    matches = [d for d in client.list_devices() if "co2" in str(d).lower()]
-    if not matches:
-        raise RuntimeError("no Meter Pro CO2 device on this account")
-    return matches[0]
+def find_vendor_device(client, device=DEFAULT_DEVICE) -> dict:
+    """The account entry for one of our devices, matched by type then by name.
 
-
-def fetch(start: date, end: date) -> pd.DataFrame:
-    """History for a date range, in the same shape the collector writes.
-
-    The only function here that touches the network. Everything deciding *what*
-    to ask for is a pure function of the ledger above, so the incremental
-    policy is testable against stored parquet with no credentials at all.
+    The private API reports `device_type` as a numeric code for some families
+    and a Wo-name for others, and the entry is sometimes nested under
+    `device_detail`, so the type match reads both places and the device's own
+    `name_hints` are the fallback. If neither identifies exactly one device the
+    account's devices are listed in the error: a wrong MAC here would write one
+    sensor's history into the other's tree, which nothing downstream could
+    detect, so guessing is worse than failing.
     """
-    client = _client()
-    device = _co2_device(client)
-    rows = client.get_meter_pro_history(
-        device["device_mac"],
-        start_date=start.strftime("%Y%m%d"),
-        end_date=end.strftime("%Y%m%d"),
-    )
+    device = device_for(device)
+    entries = client.list_devices()
+
+    def type_of(entry):
+        return str(entry.get("device_type")
+                   or (entry.get("device_detail") or {}).get("device_type") or "")
+
+    wanted = {t.lower() for t in device.vendor_types}
+    matches = [e for e in entries if type_of(e).lower() in wanted]
+    if not matches:
+        matches = [e for e in entries
+                   if any(t.lower() in type_of(e).lower() for t in device.vendor_types)]
+    if not matches:
+        matches = [e for e in entries
+                   if any(h in str(e.get("device_name", "")).lower()
+                          for h in device.name_hints)]
+    if len(matches) == 1:
+        return matches[0]
+    listing = ", ".join(f"{e.get('device_name')!r} ({type_of(e)})" for e in entries)
+    raise RuntimeError(
+        f"{'no' if not matches else len(matches)} device(s) on this account "
+        f"match {device.slug!r} (types {device.vendor_types}, name hints "
+        f"{device.name_hints}); account holds: {listing}. Pass --mac to pin it.")
+
+
+# Kept because it named the one device this module used to know about.
+def _co2_device(client) -> dict:
+    return find_vendor_device(client, METER_PRO_CO2)
+
+
+def frame_from_rows(rows, device=DEFAULT_DEVICE) -> pd.DataFrame:
+    """Vendor rows -> the frame the collector writes. Pure: no network.
+
+    Shared by both endpoints, and the reason it is a separate function is the
+    timestamp handling below: every history method in the client formats its
+    points the same way, so a per-endpoint copy of this would be a per-endpoint
+    copy of the two-hour bug.
+    """
+    device = device_for(device)
+    columns = list(device.channels)
     if not rows:
-        return pd.DataFrame(columns=["temp", "rh", "co2"])
+        return pd.DataFrame(columns=columns)
 
     frame = pd.DataFrame(rows)
     # The client formats each point with .astimezone() before strftime, so the
@@ -539,8 +802,20 @@ def fetch(start: date, end: date) -> pd.DataFrame:
                    .dt.tz_convert("UTC"))
     frame = frame.rename(columns={"temperature_c": "temp", "humidity_pct": "rh",
                                   "co2_ppm": "co2"})
-    frame = frame.set_index("ts")[["temp", "rh", "co2"]]
-    frame = frame.dropna(subset=["co2"]).sort_index()
+    # get_sensor_history never returns a CO2 field for any device, so a rack
+    # frame has two channels and asking for a third would be a KeyError rather
+    # than a column of nulls.
+    for column in columns:
+        if column not in frame:
+            frame[column] = pd.NA
+    frame = frame.set_index("ts")[columns]
+    # For the CO2 meter, a row without CO2 is not worth keeping -- that is the
+    # rule this module has always applied. For a device with no CO2 channel the
+    # equivalent is a row with no measurement in it at all.
+    frame = frame.dropna(subset=(["co2"] if device.has_co2 else columns),
+                         how="all").sort_index()
+    if frame.empty:
+        return frame
     # A reading in the future means the offset handling is wrong again.
     ahead = frame.index.max() - pd.Timestamp.utcnow()
     if ahead > pd.Timedelta(minutes=5):
@@ -550,7 +825,32 @@ def fetch(start: date, end: date) -> pd.DataFrame:
     return frame
 
 
-def fetch_ranges(ranges, fetcher=None) -> pd.DataFrame:
+def fetch(start: date, end: date, device=DEFAULT_DEVICE, mac: str = None) -> pd.DataFrame:
+    """History for a date range, in the same shape the collector writes.
+
+    The only function here that touches the network. Everything deciding *what*
+    to ask for is a pure function of the ledger above, and everything shaping
+    what comes back is `frame_from_rows`, so both are testable against stored
+    parquet with no credentials at all.
+
+    The endpoint is chosen by the device: `get_meter_pro_history` for the Meter
+    Pro family, which is the only one carrying CO2, and `get_sensor_history`
+    for everything else. They differ in the response as well as the path -- the
+    latter has no `co2_ppm` key at all, for any device.
+    """
+    device = device_for(device)
+    client = _client()
+    if mac is None:
+        mac = find_vendor_device(client, device)["device_mac"]
+    call = (client.get_meter_pro_history if device.has_co2
+            else client.get_sensor_history)
+    rows = call(mac,
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"))
+    return frame_from_rows(rows, device)
+
+
+def fetch_ranges(ranges, device=DEFAULT_DEVICE, fetcher=None) -> pd.DataFrame:
     """Fetch each planned range and concatenate.
 
     `fetcher` is injected so a caller -- or a test -- can drive the whole
@@ -559,29 +859,35 @@ def fetch_ranges(ranges, fetcher=None) -> pd.DataFrame:
     `backfill.fetch` at module level is enough to take the network out of the
     picture entirely.
     """
+    device = device_for(device)
     fetcher = fetch if fetcher is None else fetcher
     frames = []
     for start, end in ranges:
         # end + 1 because the vendor's range excludes the final day.
-        frame = fetcher(start, end + timedelta(days=1))
+        frame = fetcher(start, end + timedelta(days=1), device)
         if len(frame):
             frames.append(frame)
     if not frames:
-        return pd.DataFrame(columns=["temp", "rh", "co2"])
+        return pd.DataFrame(columns=list(device.channels))
     combined = pd.concat(frames)
     return combined[~combined.index.duplicated(keep="last")].sort_index()
 
 
-def merge(history: pd.DataFrame) -> dict:
+def merge(history: pd.DataFrame, device=DEFAULT_DEVICE) -> dict:
     """Write history into the day partitions without displacing polled rows.
 
     Polled readings win on a tie: they were recorded by this pipeline, at a
     known time, whereas a backfilled row has passed through the vendor's cloud
     and the phone's clock.
+
+    `device` selects the tree. Dedup on the timestamp alone stays correct here
+    only because one tree holds one device -- with both sensors in a shared
+    tree this line would silently drop whichever row lost a collision.
     """
+    device = device_for(device)
     written = {}
     for day, chunk in history.groupby(history.index.date):
-        path = partition_for(pd.Timestamp(day))
+        path = partition_for(pd.Timestamp(day), device)
         existing = pd.read_parquet(path) if path.exists() else None
         combined = chunk if existing is None else pd.concat([chunk, existing])
         # keep="last" so the polled rows, concatenated second, survive.
@@ -591,8 +897,8 @@ def merge(history: pd.DataFrame) -> dict:
     return written
 
 
-def gaps(threshold: float = COVERAGE_THRESHOLD) -> list:
-    cov = coverage()
+def gaps(threshold: float = COVERAGE_THRESHOLD, device=DEFAULT_DEVICE) -> list:
+    cov = coverage(device)
     if cov.empty:
         return []
     return [d.date() for d in cov.index[cov["coverage"] < threshold]]
@@ -620,6 +926,84 @@ def report_plan(plan: dict, ranges: list, stats: dict, today: date,
           f"{OLD_WINDOW_DAYS}-day window ({after - before:+d})")
 
 
+def run_device(device, state: dict, args, today: date, fetcher=None) -> int:
+    """Plan, fetch, merge and record one device. Mutates its sub-ledger.
+
+    Returns 0 on success and 1 if the vendor served nothing, which is what the
+    single-device version returned in the same situations. Exceptions are left
+    to the caller, which catches them per device so that one sensor cannot cost
+    another its repair.
+
+    `state` is the whole ledger; the sub-ledger is taken from it here so that
+    the caller can save the file once for all devices.
+    """
+    device = device_for(device)
+    ledger = state_for(state, device)
+    stats = partition_stats(device)
+    print(f"== {device.slug}  ({device.label}) -> DATA_DIR/{device.root}")
+    swept = False
+
+    if args.all:
+        # Deliberately blind to the ledger: --all means "ask for everything",
+        # and it is the escape hatch for when the ledger is not to be trusted.
+        start, end = earliest_date(device), today
+        plan = {start + timedelta(days=i): "all"
+                for i in range((end - start).days + 1)}
+        print(f"  fetching everything from {start} to {end}")
+    elif args.gaps:
+        days = gaps(args.threshold, device)
+        if not days:
+            print(f"  no day below {args.threshold:.0%} coverage; "
+                  f"nothing to repair")
+            return 0
+        plan = {d: "gap" for d in days}
+        print(f"  {len(days)} day(s) below {args.threshold:.0%}, "
+              f"spanning {min(days)} to {max(days)}")
+    else:
+        swept = args.sweep or due_sweep(ledger, today)
+        plan = plan_days(ledger, today, recent_days=args.days, sweep=swept,
+                         gap_days=gaps(args.threshold, device), device=device)
+        print(f"  incremental: {len(plan)} day(s) planned"
+              f"{'  (periodic re-window due)' if swept else ''}")
+
+    ranges = coalesce(plan)
+    report_plan(plan, ranges, stats, today, args.days)
+
+    for day, rows in stale_days(ledger, today, device):
+        print(f"  {device.slug}: never came back dense: {day} ({rows} rows). "
+              f"Past retention and past the lookback; only --all will retry it",
+              file=sys.stderr)
+
+    if args.plan:
+        return 0
+
+    requested = expand(ranges)
+    history = fetch_ranges(ranges, device, fetcher=fetcher)
+    if history.empty:
+        print(f"  {device.slug}: the vendor returned no rows. Open the device's "
+              f"history screen in the app with Bluetooth connected, then retry.",
+              file=sys.stderr)
+        # Record the zero rather than leaving a stale dense count in place: a
+        # day that comes back empty must not keep looking settled.
+        for day in requested:
+            record_fetch(ledger, day, 0, 0)
+        return 1
+
+    print(f"  fetched {len(history)} rows, "
+          f"{history.index.min()} to {history.index.max()}")
+    for day, added in sorted(merge(history, device).items()):
+        print(f"    {day}  +{added} rows")
+
+    served = {day: (len(chunk), bins_covered(chunk.index))
+              for day, chunk in history.groupby(history.index.date)}
+    for day in requested:
+        rows, bins = served.get(day, (0, 0))
+        record_fetch(ledger, day, int(rows), int(bins))
+    if swept:
+        ledger["last_sweep"] = today.isoformat()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--all", action="store_true",
@@ -633,78 +1017,69 @@ def main() -> int:
                         help="show what an incremental run would fetch, no network")
     parser.add_argument("--sweep", action="store_true",
                         help="force the periodic re-window this run")
+    parser.add_argument("--device", action="append", metavar="SLUG",
+                        help=f"restrict to one sensor (repeatable); "
+                             f"default: all of {', '.join(sorted(DEVICES))}")
+    parser.add_argument("--mac", metavar="MAC",
+                        help="pin the vendor MAC instead of matching by device "
+                             "type or name; only valid with a single --device")
     parser.add_argument("--reset-state", action="store_true",
                         help="rebuild the ledger from the partitions on disk")
+    parser.add_argument("--migrate-state", action="store_true",
+                        help="upgrade the ledger file to v2 (per device), "
+                             "keeping a copy of the original")
+    parser.add_argument("--revert-state", action="store_true",
+                        help="restore the ledger copy --migrate-state kept")
     args = parser.parse_args()
 
     today = datetime.now(timezone.utc).date()
-    stats = partition_stats()
+    devices = [device_for(slug) for slug in (args.device or sorted(DEVICES))]
+    if args.mac and len(devices) != 1:
+        parser.error("--mac pins one device's MAC, so it needs exactly one "
+                     "--device")
 
+    if args.migrate_state:
+        return migrate_state()
+    if args.revert_state:
+        return revert_state()
     if args.reset_state:
-        save_state(seed_state(stats, today))
-        print(f"ledger rebuilt from {len(stats)} partition(s) -> {STATE_PATH}")
+        state = seed_state(today, devices=DEVICES.values())
+        save_state(state)
+        counts = ", ".join(f"{slug}: {len(d['days'])}"
+                           for slug, d in sorted(state["devices"].items()))
+        print(f"ledger rebuilt from the partitions on disk ({counts}) "
+              f"-> {STATE_PATH}")
         return 0
 
     state = load_state(today=today)
-    swept = False
+    # A pinned MAC skips device discovery entirely, for the case where the
+    # rack sensor's device_type is not one this build recognises.
+    fetcher = (None if not args.mac else
+               lambda start, end, device: fetch(start, end, device, mac=args.mac))
 
-    if args.all:
-        # Deliberately blind to the ledger: --all means "ask for everything",
-        # and it is the escape hatch for when the ledger is not to be trusted.
-        start, end = earliest_date(), today
-        plan = {start + timedelta(days=i): "all"
-                for i in range((end - start).days + 1)}
-        print(f"fetching everything from {start} to {end}")
-    elif args.gaps:
-        days = gaps(args.threshold)
-        if not days:
-            print(f"no day below {args.threshold:.0%} coverage; nothing to repair")
-            return 0
-        plan = {d: "gap" for d in days}
-        print(f"{len(days)} day(s) below {args.threshold:.0%}, "
-              f"spanning {min(days)} to {max(days)}")
-    else:
-        swept = args.sweep or due_sweep(state, today)
-        plan = plan_days(state, today, recent_days=args.days, sweep=swept,
-                         gap_days=gaps(args.threshold))
-        print(f"incremental: {len(plan)} day(s) planned"
-              f"{'  (periodic re-window due)' if swept else ''}")
+    failed, empty = [], []
+    try:
+        for device in devices:
+            try:
+                if run_device(device, state, args, today, fetcher=fetcher):
+                    empty.append(device.slug)
+            except Exception as exc:                      # noqa: BLE001
+                # One device's failure must not cost another its repair: the
+                # CO2 series is the only one that cannot be reconstructed from
+                # anything else, and it is no longer the only device here.
+                print(f"  {device.slug}: backfill failed -- "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                failed.append(device.slug)
+    finally:
+        # Whatever was learned before a failure is still worth keeping: the
+        # ledger is how a day stays in the plan, and losing it means re-fetching
+        # rather than losing data.
+        if not args.plan:
+            save_state(state)
 
-    ranges = coalesce(plan)
-    report_plan(plan, ranges, stats, today, args.days)
-
-    for day, rows in stale_days(state, today):
-        print(f"  never came back dense: {day} ({rows} rows). Past retention and "
-              f"past the lookback; only --all will retry it", file=sys.stderr)
-
-    if args.plan:
-        return 0
-
-    requested = expand(ranges)
-    history = fetch_ranges(ranges)
-    if history.empty:
-        print("the vendor returned no rows. Open the device's history screen in "
-              "the app with Bluetooth connected, then retry.", file=sys.stderr)
-        # Record the zero rather than leaving a stale dense count in place: a
-        # day that comes back empty must not keep looking settled.
-        for day in requested:
-            record_fetch(state, day, 0, 0)
-        save_state(state)
-        return 1
-
-    print(f"fetched {len(history)} rows, {history.index.min()} to {history.index.max()}")
-    for day, added in sorted(merge(history).items()):
-        print(f"  {day}  +{added} rows")
-
-    served = {day: (len(chunk), bins_covered(chunk.index))
-              for day, chunk in history.groupby(history.index.date)}
-    for day in requested:
-        rows, bins = served.get(day, (0, 0))
-        record_fetch(state, day, int(rows), int(bins))
-    if swept:
-        state["last_sweep"] = today.isoformat()
-    save_state(state)
-    return 0
+    if failed:
+        return 2
+    return 1 if empty else 0
 
 
 if __name__ == "__main__":
