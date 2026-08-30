@@ -9,6 +9,13 @@ looks like after the fact.
 So this writes append-only partitioned files that a re-run cannot corrupt, and
 reports staleness rather than waiting to be asked.
 
+`coverage()` scores each day against this poll's five-minute cadence, which is
+the right question for "is the collector working" and the wrong one for "is
+this day complete". The vendor's stored history is one-minute, so a day at 100%
+here is still missing four fifths of the rows the cloud holds. src/backfill.py
+therefore judges completeness from `partition_rows()` and its own ledger, and
+uses `coverage()` only to find days the poll itself under-covered.
+
     python3 src/pipeline.py <deviceId>          one poll
     python3 src/pipeline.py <deviceId> --status coverage report, no network
 """
@@ -90,13 +97,51 @@ def poll(device_id: str) -> dict:
             time.sleep(BACKOFF_SECONDS * attempt)
 
 
+def partitions() -> list:
+    return sorted((paths.DATA_DIR / "live").glob("date=*/readings.parquet"))
+
+
+def bins_covered(index) -> int:
+    """How many five-minute bins of a day hold at least one reading.
+
+    Rows are a poor completeness measure: the device's true interval drifts
+    around a minute, so a complete day from the vendor is anywhere from 1,340
+    to 1,400 rows and no fixed target separates "complete" from "nearly". Bins
+    do separate them, because a bin is either covered or it is a hole, and a
+    hole is the only thing the backfill exists to repair. 288 of 288 means
+    nothing is missing at the resolution everything downstream resamples to.
+    """
+    return len(set(pd.DatetimeIndex(index).floor(f"{CADENCE_MINUTES}min")))
+
+
+def partition_stats() -> dict:
+    """{"YYYY-MM-DD": {"rows": n, "bins": b}} for every partition on disk.
+
+    Split out of coverage() because src/backfill.py's ledger needs raw counts
+    without the five-minute-cadence assumption baked into `expected`. The
+    vendor's stored history is one-minute, so a day scoring 100% against the
+    poll still has four fifths of its resolution waiting in the cloud, and a
+    completeness judgement made on `coverage` alone would call such a day done.
+    """
+    stats = {}
+    for f in partitions():
+        frame = pd.read_parquet(f)
+        stats[f.parent.name.removeprefix("date=")] = {
+            "rows": len(frame), "bins": bins_covered(frame.index)}
+    return stats
+
+
+def partition_rows() -> dict:
+    """{"YYYY-MM-DD": rows} for every day partition on disk."""
+    return {day: s["rows"] for day, s in partition_stats().items()}
+
+
 def coverage() -> pd.DataFrame:
     """What was collected per day, and where the gaps are."""
-    files = sorted((paths.DATA_DIR / "live").glob("date=*/readings.parquet"))
-    if not files:
+    rows = partition_rows()
+    if not rows:
         return pd.DataFrame(columns=["rows", "expected", "coverage"])
 
-    rows = {f.parent.name.removeprefix("date="): len(pd.read_parquet(f)) for f in files}
     frame = pd.DataFrame({"rows": pd.Series(rows)})
     frame.index = pd.to_datetime(frame.index)
     frame = frame.reindex(pd.date_range(frame.index.min(), frame.index.max(), freq="D"))
@@ -112,8 +157,7 @@ def status() -> int:
         print("no readings collected yet")
         return 1
 
-    last = max(pd.read_parquet(f).index.max()
-               for f in (paths.DATA_DIR / "live").glob("date=*/readings.parquet"))
+    last = max(pd.read_parquet(f).index.max() for f in partitions())
     # read_sensor stamps in UTC, but a partition written by an older build may
     # be naive, so normalise rather than assuming either.
     last = last.tz_localize("UTC") if last.tzinfo is None else last.tz_convert("UTC")
