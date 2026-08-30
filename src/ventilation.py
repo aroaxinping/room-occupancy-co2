@@ -157,3 +157,45 @@ def ach_series(df: pd.DataFrame) -> pd.Series:
     level = (residual.rolling("14D", center=True).median()
              .reindex(df.index).interpolate(limit_direction="both").clip(0.5, 2))
     return (hour_of * level).clip(0.2, 3.0).rename("ach")
+
+
+# Solving for k from the occupancy estimate rather than from decay episodes.
+#
+# `ach_series` has two defects the simulator makes visible. It only ever looks
+# at falling stretches and it assumes the room was empty during them, so a fall
+# from two occupants to one is fitted as though nobody was there. And it can
+# only *express* k as a time-of-day profile times a fortnightly level, so
+# ventilation that comes and goes episodically -- a window opened on no
+# particular schedule -- is not representable at all. On simulated data whose
+# true k alternates between 0.39 and 1.62 with no diurnal structure,
+# `ach_series` returns a near-constant 1.0 and separates the two regimes not at
+# all (median 0.99 against a true 0.39, and 1.00 against a true 1.62).
+#
+# The mass balance gives k directly at every sample once N is known:
+#
+#     k = (G N 1e6 / V  -  dC/dt) / (C - C_out)
+#
+# which uses the accumulation as well as the decay and does not have to assume
+# the room was empty. It needs an occupancy estimate, so it belongs inside the
+# alternating loop in `states.solve` rather than upstream of it.
+MIN_EXCESS_PPM = 40.0   # below this the division is dominated by sensor noise
+K_WINDOW = "1h"         # local median: k is persistent, but not diurnal
+K_BOUNDS = (0.2, 3.5)
+
+
+def ach_from_occupancy(df: pd.DataFrame, occupants, volume: float,
+                       g_m3_per_h: float = 0.018) -> pd.Series:
+    smooth = df["co2"].rolling("30min", center=True).median()
+    hours = df.index.to_series().diff().dt.total_seconds() / 3600
+    dc_dt = (smooth.diff() / hours).where(hours <= 0.5)
+    excess = smooth - df["c_out"]
+
+    gain = g_m3_per_h * 1e6 / volume
+    k = (gain * np.asarray(occupants) - dc_dt) / excess
+    # Near the asymptote the denominator vanishes and k is unidentifiable; a
+    # negative or absurd solution means the occupancy fed in was wrong there.
+    k = k.where(excess > MIN_EXCESS_PPM)
+    k = k.where((k > 0.05) & (k < 2 * K_BOUNDS[1]))
+    return (k.rolling(K_WINDOW, center=True, min_periods=4).median()
+            .interpolate(limit_direction="both")
+            .clip(*K_BOUNDS).rename("ach"))

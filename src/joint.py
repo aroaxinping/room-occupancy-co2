@@ -42,6 +42,13 @@ def decode(df: pd.DataFrame, k_closed: float, k_open: float, volume: float,
     smooth = df["co2"].rolling("30min", center=True).median()
     hours = df.index.to_series().diff().dt.total_seconds() / 3600
     observed = np.asarray(smooth.diff() / hours)
+    # Across a multi-week outage the difference is finite and near zero, so it
+    # survives the validity mask and is scored as evidence for whichever state
+    # predicts no net change -- and Viterbi charges the same switch penalty
+    # across 26 days as across 5 minutes, so the decoder carries the
+    # pre-outage state over the gap. Three of the four blocks begin with a
+    # transition corrupted this way unless the gap is excluded outright.
+    observed[np.asarray(hours) > 0.5] = np.nan
     excess = np.asarray(smooth - df["c_out"])
     gain = g_m3_per_h * 1e6 / volume
 

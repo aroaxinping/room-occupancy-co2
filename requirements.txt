@@ -1,0 +1,12 @@
+# The sensor data is not in this repository (see "What is published"), so the
+# notebooks need a directory of readings; src/paths.py says where it is looked
+# for and ROOM_OCCUPANCY_DATA overrides it.
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0
+matplotlib>=3.7
+scipy>=1.11
+# Only needed to re-execute the notebooks via notebooks/build.py.
+nbformat>=5.9
+nbclient>=0.9
+ipykernel>=6.25

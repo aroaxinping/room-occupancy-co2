@@ -27,16 +27,27 @@ solved for directly:
 N = (dC/dt + k · (C − C_out)) · V / (G · 10⁶)
 ```
 
-This is an inverse problem, not a classifier. Nothing is trained, so there is
-nothing to overfit — but every assumption has to be earned, and most of the work
-below is about which ones did not hold.
+This is an inverse problem, not a classifier: no occupancy labels are fitted, so
+there is no train/test leakage in the usual sense. What takes its place is about
+a dozen hand-set constants — the state-transition penalty, the quantile defining
+`C_out`, the bounds on `k`, the cap of two occupants — and several were chosen
+while watching what the known-empty periods did. That is a weaker form of the
+same risk and it deserves naming rather than waving away. Two things bound it:
+the constants are physical quantities with defensible ranges rather than free
+weights, and the sensitivity analysis below sweeps the largest of them across
+its full plausible range. The cap of two occupants is ground truth supplied by
+the occupant, used as a prior.
+
+Every assumption still has to be earned, and most of the work below is about
+which ones did not hold.
 
 ## What the data actually looked like
 
-**The 1-minute resolution is fake.** 92.8% of consecutive readings are byte
--identical; the device reports every ~6 minutes and the export pads the gaps by
-repeating the last value. Computing derivatives on the raw grid produces
-±220 ppm/min artifacts that are quantisation steps, not air. Everything is
+**The 1-minute resolution is fake.** 88.5% of consecutive readings are byte
+-identical; the device reports every ~8 minutes (median) and the export pads the gaps
+by repeating the last value. On the raw grid the implied rate of
+change reaches 82 ppm/min at the 99th percentile and 1151 ppm/min at worst --
+quantisation steps, not air. Everything is
 resampled to 5 minutes.
 
 **Three channels, not six.** The export ships `abs_humidity`, `dew_point` and
@@ -49,7 +60,7 @@ information three times.
 22d / 21d), which is convenient — it gives an honest temporal split instead of a
 leaky random one.
 
-## Three assumptions that broke
+## Four assumptions that broke
 
 **1. Constant outdoor concentration.** Assuming `C_out = 415 ppm` (outdoor air)
 put 0.42 phantom people in a demonstrably empty room at 4 a.m. The room does not
@@ -69,10 +80,14 @@ moved the occupied-room estimate from 0.50 to 0.88 people against a known truth
 of 1.
 
 **3. That the fix was free.** Interpolating the episode estimates pointwise
-produced peaks of 16.5 people in a ~60 m³ office. `k` multiplies `(C − C_out)`,
+produced peaks of 16.5 people in a room of this size. `k` multiplies `(C − C_out)`,
 so its noise enters multiplicatively. Regularising it into a time-of-day profile
 times a fortnightly level — two slow components instead of 500 free values —
-keeps the calibration and caps the maximum at a plausible 5.3.
+keeps the calibration and pulls the maximum from 16.5 down to 5.3. That is
+still impossible in a room holding at most two people: the regularisation
+bought an order of magnitude, not correctness. What imposes the physical bound
+is the discrete decoding below, and the fact that a continuous inversion cannot
+get there on its own is the argument for it.
 
 **4. That decoding both unknowns jointly would help.** If ventilation and
 occupancy are both discrete and both persistent, decoding the pair
@@ -103,16 +118,23 @@ whose occupancy is known independently:
 | Period | Known | Estimated |
 |---|---|---|
 | Reference period A | empty | **0.11** |
-| Reference period B | empty | 0.26 |
-| Working hours | 1 person | **0.88** |
-| Weekend evening | 1–2 people | **1.07** (mean 1.58) |
+| Reference period B | empty | 0.34 |
+| Reference period C | 1 person | **0.88** |
+| Reference period D | 0–2, varies | 0.69 |
+| Reference period E | 1–2 people | **1.07** (mean 1.58) |
 
-The ventilation estimate reproduces a daily routine nobody supplied: `k` sits at
-0.35 through the night and peaks at 1.24 around noon, recovered purely from the
-shape of the decay curves.
+Every period the model is checked against is listed. Period B is the weakest
+result: a window known to be empty that reads a third of a person, and the
+reason the night residual is an open problem below rather than a solved one.
+Period D is the one with no fixed answer -- occupancy there genuinely varies --
+so it constrains the model only loosely.
+
+The ventilation estimate reproduces a daily routine nobody supplied: the median
+`k` runs from 0.63 at 04:00 to 1.05 in the early afternoon, recovered purely
+from the shape of the decay curves.
 
 The bands were then anchored to a measurement instead of to assumption. The room
-has exactly one window configuration, so an hour of live readings with occupancy
+has a single window configuration, so an hour of live readings with occupancy
 known to be two pins it: **1.62 +/- 0.22 ACH**, against 0.39 sealed. The window
 ventilates, by a factor of four -- but it cannot reach the 3+ band, so those
 episodes are the door.
@@ -167,20 +189,69 @@ and is the reason the next step is labels rather than parameters.
 tracks occupancy well in aggregate. Claiming accuracy at "1 vs 2 people" needs
 ground truth that does not yet exist.
 
-## Layout
+## The collector
+
+The vendor API returns present state only: there is no historical endpoint, so
+the record exists at all only because something keeps polling. `src/pipeline.py`
+runs every five minutes under launchd -- chosen over cron because it survives
+reboots and runs a missed job once the machine wakes -- writing day-partitioned
+Parquet that a re-run deduplicates rather than corrupts. Five minutes because
+that is roughly the sensor's own refresh rate, and it spends 288 of the 10,000
+API calls allowed per day.
+
+It also answers for itself:
+
+```
+$ python3 src/pipeline.py <deviceId> --status
+days collected   : 1
+median coverage  : 0.3%
+last reading     : 1 min ago
+```
+
+`--status` exits non-zero when the newest reading is over an hour old. That
+check exists because the original five months contain two silent 26-day holes,
+which is what a scheduled job failing unnoticed looks like after the fact -- and
+a hole is indistinguishable from an empty room unless something writes down
+that no reading arrived.
+
+## Reading path
+
+The notebooks are the short version, in order, with figures:
+
+1. [`notebooks/01_signal.ipynb`](notebooks/01_signal.ipynb) — what the sensor
+   actually gives you, and why the file's 1-minute resolution is fiction
+2. [`notebooks/02_ventilation.ipynb`](notebooks/02_ventilation.ipynb) —
+   recovering the air exchange rate from the decay curves alone
+3. [`notebooks/03_occupancy.ipynb`](notebooks/03_occupancy.ipynb) — the
+   inversion, why it is ill-posed, and the discrete decoding that fixes it
 
 ```
 src/load.py         parsing, cleaning, 5-min resampling, block detection
 src/baseline.py     time-varying C_out as a low envelope
 src/ventilation.py  per-episode decay fits, regularised k(t)
 src/occupancy.py    mass-balance inversion and episode detection
-src/ingest.py       SwitchBot API polling (the API serves current state only)
-```
-
-```
 src/states.py       Viterbi decoding over {0, 1, 2} occupants  <- the model that works
 src/joint.py        joint occupancy x ventilation decoding (documented failure)
 ```
+
+And the collection side:
+
+```
+src/ingest.py       SwitchBot API polling, credentials from the Keychain
+src/pipeline.py     scheduled poll, partitioned writes, staleness report
+src/label.py        recording real occupancy, so the estimate can be scored
+install-scheduler.sh + scheduler.plist.template   launchd agent
+```
+
+`git log --oneline` is worth a look: the history records the assumptions that
+broke and the audits that caught them, in the order it happened.
+
+## Reproducing this
+
+`pip install -r requirements.txt`. The sensor readings are not in the
+repository and cannot be, so the notebooks need a directory of their own data;
+`src/paths.py` says where it is looked for, and `ROOM_OCCUPANCY_DATA` overrides
+it. Everything here runs against any CO2 series with the same columns.
 
 ## What is published, and what is not
 
@@ -218,25 +289,29 @@ simply never leave the machine.
 The repository is arranged so that publishing the record cannot happen by
 accident:
 
-- **Data lives outside the repository tree** (`src/paths.py`), under the user's
-  application-support directory. A `.gitignore` entry is a rule someone can
-  edit or override with `git add -f`; keeping the files out of the tree makes
-  committing them impossible rather than discouraged. `.gitignore` still covers
-  `data/` and every tabular extension as a second layer.
+- **Data lives outside the repository tree** (`src/paths.py`). A `.gitignore`
+  entry is a rule someone can edit or override with `git add -f`; keeping the
+  files out of the tree makes committing them impossible rather than merely
+  discouraged. `.gitignore` still covers `data/` and every tabular extension as
+  a second layer.
 - **Credentials live in the macOS Keychain**, read at call time by
   `src/ingest.py`. There is deliberately no environment-variable fallback: an
   `export` writes the token into shell history in plaintext, permanently. A
-  SwitchBot token controls every device on the account, locks included.
+  vendor API token is account-wide rather than scoped to one sensor, so it is
+  treated as a high-value credential rather than as project configuration.
 - **A pre-commit hook** (`.githooks/pre-commit`, enabled with
   `git config core.hooksPath .githooks`) refuses commits containing credential
   -shaped filenames, tabular data, or long opaque strings.
-- **Validation windows are not in the source.** Naming the hours at which this
-  particular room is empty would publish the routine by another route, so
-  `src/states.py` reads them from a local file and reports them as
-  `period_a`...`period_e`.
-- **Figures go through `src/figures.py`**, which has no way to draw a real date
-  axis. The rule is enforced by the plotting code rather than left to whoever
-  is writing the notebook at the time.
+- **Validation windows are not in the source.** Naming the hours behind each
+  reference period would publish by another route what the aggregates are
+  careful not to, so `src/states.py` reads them from an uncommitted file and
+  reports them as `period_a`...`period_e`.
+- **Figures go through `src/figures.py`**, which discards the index rather than
+  drawing a date axis, refuses any caption naming a date or weekday, and will
+  only plot an allowlisted quantity against time. The guarantee stops at the
+  module boundary -- a caller holding its own axes can draw what it likes -- so
+  the notebook hook backs it up. The rule lives in the plotting code rather
+  than in the memory of whoever writes the next notebook.
 - **The pre-commit hook scans notebook outputs for dates** and refuses the
   commit if it finds any, so a stray `df.head()` cannot slip through.
 
