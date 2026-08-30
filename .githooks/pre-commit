@@ -1,0 +1,60 @@
+#!/bin/sh
+# Blocks commits that carry credentials or sensor data.
+#
+# The data lives outside the repository and secrets live in the Keychain, so
+# neither should reach a commit. This is the backstop for when one of those is
+# bypassed -- a file copied in, a `git add -f`, an edited .gitignore.
+#
+# Enable with:  git config core.hooksPath .githooks
+
+fail=0
+git diff --cached --name-only -z --diff-filter=ACM > /tmp/.staged.$$
+[ -s /tmp/.staged.$$ ] || { rm -f /tmp/.staged.$$; exit 0; }
+
+# -z plus read -d '' so paths containing spaces are handled correctly.
+while IFS= read -r -d '' f; do
+    case "$f" in
+        *.env|.env*|*credential*|*secret*|*token*|*.pem|*.key|*.p12)
+            echo "BLOCKED  $f  -- looks like a credential"; fail=1 ;;
+        *.json)
+            # No JSON belongs in this repo, and a downloaded switchbot.json or
+            # keys.json would not match the credential names above.
+            echo "BLOCKED  $f  -- JSON is blocked by default; allowlist it here if genuinely needed"; fail=1 ;;
+        *.parquet|*.csv|*.tsv|*.dat|*.jsonl|*.sqlite|*.db|data/*)
+            echo "BLOCKED  $f  -- sensor data belongs outside the repository"; fail=1 ;;
+        *.ipynb)
+            # Notebooks are allowed, but their saved outputs are where a date
+            # would hide: an axis label, a rendered dataframe, a printed index.
+            # Anything date-shaped in the file refuses the commit.
+            if grep -qE '20[0-9]{2}-[0-9]{2}-[0-9]{2}|(Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* [0-9]{1,2},? 20[0-9]{2}|(Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day' "$f"; then
+                echo "BLOCKED  $f  -- notebook contains a date or weekday; see README, published figures carry neither"
+                fail=1
+            fi ;;
+    esac
+done < /tmp/.staged.$$
+rm -f /tmp/.staged.$$
+
+# Opaque runs of 32+ chars: a SwitchBot secret is 32, the token is longer.
+# Base64 image payloads are excluded so that a committed plot does not train
+# the author to reach for --no-verify.
+if git diff --cached -U0 \
+    | grep -E '^\+' \
+    | grep -vE 'https?://|sha256|^\+\+\+|"image/(png|jpeg)"|^\+\s*"[A-Za-z0-9+/]{60,}' \
+    | grep -qE '[A-Za-z0-9+/]{32,}={0,2}'; then
+    echo "BLOCKED  a staged line contains a long opaque string that may be a token"
+    echo "         review with: git diff --cached"
+    fail=1
+fi
+
+# Explicit belt-and-braces for the one credential shape this project uses.
+if git diff --cached -U0 | grep -qE '^\+.*SWITCHBOT_(TOKEN|SECRET)\s*[=:]'; then
+    echo "BLOCKED  a staged line assigns a SwitchBot credential"
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo
+    echo "Commit refused. If this is a false positive, commit with --no-verify"
+    echo "after confirming by eye that nothing sensitive is staged."
+    exit 1
+fi
