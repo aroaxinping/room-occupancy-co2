@@ -1,0 +1,20 @@
+# Data lives outside the repository entirely (see src/paths.py). This rule is
+# defence in depth for anything copied back in by hand.
+data/
+*.parquet
+*.csv
+
+# Credentials live in the macOS Keychain and never on disk.
+.env
+*.env
+credentials*.json
+*secret*
+*token*
+
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+
+# Notebooks are committed with outputs; the pre-commit hook refuses any that
+# contain a date or weekday.
