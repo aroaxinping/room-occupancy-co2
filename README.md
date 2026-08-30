@@ -111,13 +111,20 @@ The ventilation estimate reproduces a daily routine nobody supplied: `k` sits at
 0.35 through the night and peaks at 1.24 around noon, recovered purely from the
 shape of the decay curves.
 
-What it recovered turned out not to be the window. The occupant later confirmed
-that the window carries a fly screen and a blind whose tilt mechanism is broken,
-so it has one fixed configuration; a live measurement with two known occupants
-and that window open settled at about 0.8 ACH, barely above sealed. The high-
-exchange episodes are the door. The model found the right signal and the
-interpretation had to be corrected against it -- which is the ordinary way round,
-and the reason the bands are now named for the door.
+The bands were then anchored to a measurement instead of to assumption. The room
+has exactly one window configuration, so an hour of live readings with occupancy
+known to be two pins it: **1.62 +/- 0.22 ACH**, against 0.39 sealed. The window
+ventilates, by a factor of four -- but it cannot reach the 3+ band, so those
+episodes are the door.
+
+That number took two attempts. The first, from six readings, gave 0.8 ACH and
+the conclusion that the window barely ventilated at all; the apparent plateau it
+rested on was sensor quantisation, and CO2 kept falling for another half hour.
+Both the estimate and the conclusion drawn from it were wrong, and thirteen
+readings overturned them. It is recorded here because the failure mode is the
+interesting part: a six-point fit reported an error bar of +/- 1.19 on a value
+of 2.62, which is the fit saying it does not know, and the plateau was read as
+signal anyway.
 
 ## Sensitivity to the generation rate
 
