@@ -1,5 +1,12 @@
 """Room temperature as a second observable: an appliance, not a metabolism.
 
+UNVALIDATED. The observable this measures is real -- see the module notes --
+but the decoder improvement once claimed for it was measured against
+hour-by-weekday windows that a calendar rule reproduces perfectly, so it
+was never evidence. On metrics a calendar cannot win, the gain is 1.4
+points with an interval spanning zero. Kept off the default path pending
+labels that can settle it.
+
 The CO2 channel cannot tell CO2 that is being generated now from CO2 that is
 still clearing from last night. Both look like "elevated and falling slowly",
 and that one ambiguity is where the model's errors concentrate: the weekday
