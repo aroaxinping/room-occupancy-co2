@@ -114,7 +114,10 @@ def status() -> int:
 
     last = max(pd.read_parquet(f).index.max()
                for f in (paths.DATA_DIR / "live").glob("date=*/readings.parquet"))
-    age = datetime.now(timezone.utc) - last.tz_localize("UTC")
+    # read_sensor stamps in UTC, but a partition written by an older build may
+    # be naive, so normalise rather than assuming either.
+    last = last.tz_localize("UTC") if last.tzinfo is None else last.tz_convert("UTC")
+    age = datetime.now(timezone.utc) - last
     poor = cov[cov["coverage"] < 0.9]
 
     print(f"days collected   : {len(cov)}")

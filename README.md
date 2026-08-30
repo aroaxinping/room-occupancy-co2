@@ -69,7 +69,7 @@ moved the occupied-room estimate from 0.50 to 0.88 people against a known truth
 of 1.
 
 **3. That the fix was free.** Interpolating the episode estimates pointwise
-produced peaks of 16.5 people in a 61 m³ office. `k` multiplies `(C − C_out)`,
+produced peaks of 16.5 people in a ~60 m³ office. `k` multiplies `(C − C_out)`,
 so its noise enters multiplicatively. Regularising it into a time-of-day profile
 times a fortnightly level — two slow components instead of 500 free values —
 keeps the calibration and caps the maximum at a plausible 5.3.
@@ -108,8 +108,16 @@ whose occupancy is known independently:
 | Weekend evening | 1–2 people | **1.07** (mean 1.58) |
 
 The ventilation estimate reproduces a daily routine nobody supplied: `k` sits at
-0.35 through the night and peaks at 1.24 around noon. The model recovered when
-the window gets opened purely from the shape of the decay curves.
+0.35 through the night and peaks at 1.24 around noon, recovered purely from the
+shape of the decay curves.
+
+What it recovered turned out not to be the window. The occupant later confirmed
+that the window carries a fly screen and a blind whose tilt mechanism is broken,
+so it has one fixed configuration; a live measurement with two known occupants
+and that window open settled at about 0.8 ACH, barely above sealed. The high-
+exchange episodes are the door. The model found the right signal and the
+interpretation had to be corrected against it -- which is the ordinary way round,
+and the reason the bands are now named for the door.
 
 ## Sensitivity to the generation rate
 

@@ -1,8 +1,12 @@
 # Data lives outside the repository entirely (see src/paths.py). This rule is
 # defence in depth for anything copied back in by hand.
 data/
+logs/
 *.parquet
 *.csv
+*.jsonl
+*.out
+*.err
 
 # Credentials live in the macOS Keychain and never on disk.
 .env

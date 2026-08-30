@@ -8,6 +8,10 @@
 # outside the repository.
 set -e
 [ -n "$1" ] || { echo "usage: $0 <deviceId>   (list them with: python3 src/pipeline.py)"; exit 1; }
+# The id is substituted into a sed script and then into XML, so anything but
+# hex would either corrupt the plist silently (sed treats & as the match) or
+# inject a key into it. SwitchBot ids are hex, so require that.
+case "$1" in *[!0-9A-Fa-f]*) echo "deviceId must be hexadecimal"; exit 1;; esac
 
 REPO=$(cd "$(dirname "$0")" && pwd)
 PYTHON=$(command -v python3)

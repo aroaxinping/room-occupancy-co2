@@ -24,8 +24,16 @@ MIN_DROP = 30       # ppm; smaller falls are sensor noise, not a real decay
 ACH_MAX = 15.0      # above this the fit is degenerate, not a real room
 
 # Interpretation bands for the fitted ACH.
+#
+# These were originally labelled by window state, which was wrong. The room's
+# window is fitted with a fly screen and a venetian blind whose tilt wand is
+# broken, so its slats have not moved once across the record: the window has
+# exactly one configuration, and a measurement with it open gives about 0.8 ACH
+# -- barely above sealed. The high-exchange episodes therefore cannot be the
+# window. They are the door standing open to the rest of the home, which is the
+# only real ventilation control this room has.
 BANDS = [(0.0, 0.5, "sealed"), (0.5, 1.5, "infiltration"),
-         (1.5, 3.0, "window ajar"), (3.0, ACH_MAX, "window open")]
+         (1.5, 3.0, "door ajar"), (3.0, ACH_MAX, "door open")]
 
 
 def find_decay_episodes(df: pd.DataFrame) -> pd.DataFrame:

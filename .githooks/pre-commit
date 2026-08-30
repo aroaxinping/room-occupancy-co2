@@ -20,14 +20,17 @@ while IFS= read -r -d '' f; do
             # No JSON belongs in this repo, and a downloaded switchbot.json or
             # keys.json would not match the credential names above.
             echo "BLOCKED  $f  -- JSON is blocked by default; allowlist it here if genuinely needed"; fail=1 ;;
-        *.parquet|*.csv|*.tsv|*.dat|*.jsonl|*.sqlite|*.db|data/*)
+        *.parquet|*.csv|*.tsv|*.dat|*.jsonl|*.sqlite|*.db|data/*|logs/*|*.out|*.err)
             echo "BLOCKED  $f  -- sensor data belongs outside the repository"; fail=1 ;;
         *.ipynb)
             # Notebooks are allowed, but their saved outputs are where a date
             # would hide: an axis label, a rendered dataframe, a printed index.
             # Anything date-shaped in the file refuses the commit.
-            if grep -qE '20[0-9]{2}-[0-9]{2}-[0-9]{2}|(Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* [0-9]{1,2},? 20[0-9]{2}|(Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day' "$f"; then
-                echo "BLOCKED  $f  -- notebook contains a date or weekday; see README, published figures carry neither"
+            # Only source and output text are scanned. Checking the raw file
+            # would also scan base64 image payloads, whose alphabet can spell a
+            # weekday by chance -- a block on an innocent notebook is how an
+            # author learns to reach for --no-verify.
+            if ! python3 "$(dirname "$0")/check_notebook.py" "$f"; then
                 fail=1
             fi ;;
     esac
