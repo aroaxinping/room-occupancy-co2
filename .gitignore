@@ -9,6 +9,8 @@ live*/
 *.jsonl
 # pipeline bookkeeping, wherever it is written from
 *_state.json
+# the windows the period_a..period_e naming exists to hide
+validation_periods.json
 *.out
 *.err
 

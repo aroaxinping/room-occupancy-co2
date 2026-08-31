@@ -1,48 +1,54 @@
-"""Repair gaps in the collected record from the vendor's own history.
+"""Repair gaps in the collected record from a source of stored history.
 
-The official API serves present state only, so the collector's five-minute poll
+The poll's API serves present state only, so the collector's five-minute cycle
 is the sole source of new data -- and any hour it does not run is lost for good.
 That was the architecture's weakest point: a laptop asleep, a job that dies
 quietly, and the record has a hole indistinguishable from an empty room.
 
-The app's private API does keep history, and `switchbotapi` reaches it. So the
-loss is repairable after the fact: find the days the collector under-covered,
-ask for them, and merge. The poll stays the primary source because it is
-independent of anyone's phone; this is the safety net under it.
+Something else, though, keeps past readings: an export directory, a database,
+an account whose history outlives the poll. If a store can answer "what did you
+record for this device between these two dates", the loss is repairable after
+the fact -- find the days the collector under-covered, ask for them, and merge.
+The poll stays primary because it depends on nothing but this machine; this is
+the safety net under it.
 
-Credentials come from the macOS Keychain, never from arguments and never from
-the environment -- a password on a command line is visible to every process on
-the machine via `ps`, and an exported one lands in shell history permanently.
-Both are how the upstream client's own examples do it.
+*Which* store answers is configuration rather than an import. This module
+depends on the contract in src/history_source.py -- rows of timestamp,
+temperature, humidity and CO2 for one device over a date range -- and that
+module resolves the actual source at run time from a file outside the
+repository. Nothing below knows what is on the other end, so replacing one
+store with another is a configuration change rather than a patch, and a test
+can stand in for the source without pretending to be anything in particular.
 
-Note what is being handed over: an account email and password, not a scoped
-token. A compromise of the client library is a compromise of the whole account,
-including device control. It is imported lazily and left out of
-requirements.txt for that reason -- nothing else here depends on it.
+No credential is read here either. A source that needs one obtains it for
+itself; the planning, merging and ledger code never sees it.
 
     python3 src/backfill.py                  incremental refresh (the daily job)
     python3 src/backfill.py --plan           what that run would fetch, no network
     python3 src/backfill.py --gaps           repair days below the coverage threshold
-    python3 src/backfill.py --all            re-fetch everything the cloud holds
+    python3 src/backfill.py --all            re-fetch everything the source holds
     python3 src/backfill.py --device rack    restrict any of the above to one sensor
     python3 src/backfill.py --migrate-state  upgrade the ledger to v2 (see below)
     python3 src/backfill.py --revert-state   undo that, from the backup it kept
+    python3 src/history_source.py            which source is configured, if any
 
-Two devices, two endpoints
---------------------------
-Both sensors in the room are repaired from the cloud, and the vendor serves
-them from different endpoints with different payloads:
+Two devices, one contract
+-------------------------
+Both sensors in the room are repaired this way, and they do not carry the same
+channels:
 
-    meterpro-co2   get_meter_pro_history(mac, start_date, end_date, ...)
-                   -> {"timestamp", "temperature_c", "humidity_pct", "co2_ppm"}
-    rack           get_sensor_history(mac, start_date, end_date, ...)
-                   -> {"timestamp", "temperature_c", "humidity_pct"}
+    meterpro-co2   temperature, humidity and CO2
+    rack           temperature and humidity
 
-`get_sensor_history` carries no CO2 for any device -- that is a property of the
-endpoint, not of the hardware -- so the rack's frame has two channels and the
-CO2 meter's has three. Both go through the same timestamp handling, because
-both are formatted by the same code in the client and both are wrong in the
-same way if read naively (see "On the vendor's timestamps").
+A source may also serve fewer channels than a device has -- an export or a
+history endpoint that carries no CO2 for anything is a property of the store
+rather than of the hardware. So the rack's frame has two channels and the CO2
+meter's has three, keys the source omits become absent columns, and asking a
+rack frame for CO2 is a KeyError rather than a column of nulls.
+
+Both devices go through the same timestamp handling, because a source formats
+all of its points the same way and all of them are wrong in the same way if
+read naively (see "On the source's timestamps").
 
 Each device is planned, fetched, merged and recorded separately, in its own
 partition tree (src/pipeline.py explains why they are separate) against its own
@@ -58,9 +64,9 @@ nothing.
 
 The obvious fix is a watermark: remember the newest timestamp fetched and start
 the next run there. Here that is not merely wasteful to get wrong, it is
-silently destructive. The vendor's cloud holds only what the phone or hub has
-uploaded, and that upload happens when someone opens the device's history
-screen with Bluetooth in range -- which can lag by days. So a day is routinely
+silently destructive. A store fed by an intermittent uploader -- a hub or an
+app that syncs only when it is opened, which is the common case -- holds only
+what has reached it so far, and that can lag by days. So a day is routinely
 *sparse when first asked for and complete later*. A watermark advances past
 such a day on the strength of the clock alone, never looks at it again, and the
 missing hours become permanent and invisible. That is not hypothetical: the
@@ -84,7 +90,7 @@ candidate:
                 consecutive fetches returned the same row count, and it is at
                 least MIN_SETTLE_COVERAGE dense. Any growth resets the streak to
                 zero, so a day that fills in late is by construction fetched
-                again after it fills in. This door exists for days the cloud
+                again after it fills in. This door exists for days the source
                 genuinely never had -- the sensor was off, the hub was down --
                 which would otherwise be retried forever. A day thinner than
                 MIN_SETTLE_COVERAGE cannot use it at all, however stable it is,
@@ -125,14 +131,14 @@ Take a day D that the cloud serves half-empty on Monday and complete on Friday.
     unparsable state file degrades to "nothing is settled" rather than to
     "everything is settled", and the periodic re-window re-fetches the last
     month regardless of what the ledger claims.
-  * Suppose a day was settled as complete and the cloud later serves *more* of
+  * Suppose a day was settled as complete and the source later serves *more* of
     it. That cannot mean a repaired hole -- every bin was already covered -- so
     skipping it loses no coverage; and the re-window picks the extra rows up
     within SWEEP_EVERY_DAYS anyway.
 
 The one case *not* recovered automatically is a day that is both older than
-LOOKBACK_DAYS and has never come back dense -- typically a day past the
-vendor's ~3-month retention, where no number of retries will help. Those are
+LOOKBACK_DAYS and has never come back dense -- typically a day past whatever
+retention the source keeps, where no number of retries will help. Those are
 not skipped silently either: they stay in the ledger, and every run prints them
 under "never came back dense", with `--all` still asking for them. Failing
 loudly and cheaply was the whole point of the exercise.
@@ -140,8 +146,8 @@ loudly and cheaply was the whole point of the exercise.
 What it saves
 -------------
 Measured by replaying the policy day by day over the record already on disk,
-with the partitions standing in for the vendor (for a backfilled day they are
-exactly what the vendor served) and nothing served ahead of the simulated
+with the partitions standing in for the source (for a backfilled day they are
+exactly what the source served) and nothing served ahead of the simulated
 clock:
 
     ordinary run   1,652 rows, against 5,726 for the old window   -71%
@@ -205,26 +211,32 @@ broken environment does not also cost the ledger. It is written atomically
 (temp file plus `os.replace`) so a crash mid-write cannot leave a truncated
 file -- and, worse, one that happens to parse as "everything is settled".
 
-On the vendor's timestamps
+On the source's timestamps
 --------------------------
-The client formats each point in LOCAL wall-clock time with no offset attached;
-`frame_from_rows()` localises before converting to UTC. Labelling those strings
-UTC reads naturally and is wrong by the local offset -- that was a real
-two-hour bug, and the same function still refuses any response whose newest
-reading lands in the future, which is how it was caught.
+This is the one part of the contract a source cannot leave to inference, and
+the reason it is stated rather than guessed is that guessing it wrong once cost
+a day of analysis. A store that formats each point in LOCAL wall-clock time and
+attaches no offset produces strings that read exactly like UTC and are wrong by
+the local offset. Labelling them UTC shifted a whole backfilled record by two
+hours; every window analysed was then not the window it was labelled with, and
+nothing in the numbers looked odd.
 
-This is not specific to the Meter Pro endpoint. Every history method in the
-client formats its points the same way -- `datetime.fromtimestamp(dd,
-tz=utc).astimezone().strftime(...)`, which drops the offset it just applied --
-so `get_sensor_history` returns exactly the same trap for the rack sensor. Both
-devices therefore share one parsing function rather than each having its own:
-the localise-then-convert step and the future guard are written once, and a
-third device cannot be added with a fresh copy of the bug.
+So a source declares its convention -- "local-naive", "utc-naive" or "aware",
+see src/history_source.py -- and `frame_from_rows()` applies it: localise then
+convert, label then leave, or convert. There is no default, because the failure
+mode of assuming wrongly is silent.
 
-The vendor only serves what the phone app has uploaded, and that upload happens
-when someone opens the device's history screen with Bluetooth connected. An
-empty response usually means that has not happened recently, not that the call
-failed.
+`frame_from_rows()` also refuses any response whose newest reading lands in the
+future, which is how the two-hour error was caught, and that guard stays on
+whatever a source declares -- a declaration is a claim about the source, not a
+proof, and the guard is the only cheap check that the claim holds. Both devices
+share this one function rather than each parsing its own rows, so the
+convention handling and the future guard are written once and a third device
+cannot be added with a fresh copy of the bug.
+
+An empty response is not an error. A store fed by an intermittent uploader
+serves only what has reached it; nothing to return usually means nothing has
+been uploaded lately, not that the call failed.
 """
 import argparse
 import json
@@ -235,9 +247,9 @@ from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 
+import history_source
 import paths
-from ingest import (DEFAULT_DEVICE, DEVICES, METER_PRO_CO2, _credential,
-                    device_for)
+from ingest import DEFAULT_DEVICE, DEVICES, device_for
 from pipeline import (CADENCE_MINUTES, bins_covered, coverage, device_root,
                       partition_for, partition_stats)
 
@@ -266,9 +278,12 @@ STATE_VERSION = 2
 # Where --migrate-state parks the v1 file, and where --revert-state looks for
 # it. A copy, never a move: nothing under DATA_DIR is deleted by either.
 STATE_BACKUP_PATH = paths.DATA_DIR / "backfill_state.v1.bak.json"
-# The vendor's history is one-minute, so a full day is this many rows.
-VENDOR_CADENCE_MINUTES = 1
-EXPECTED_VENDOR_ROWS = 24 * 60 // VENDOR_CADENCE_MINUTES
+# The stored history this is judged against is one-minute, so a full day is
+# this many rows. It describes the source's native resolution, not the poll's
+# (src/pipeline.py), and a source that stores at another interval wants this
+# retuned -- it is the denominator of "dense", nothing more.
+SOURCE_CADENCE_MINUTES = 1
+EXPECTED_SOURCE_ROWS = 24 * 60 // SOURCE_CADENCE_MINUTES
 # A day thinner than this never settles: "stably thin" is what an un-uploaded
 # day looks like, and settling one is how a gap becomes permanent.
 MIN_SETTLE_COVERAGE = 0.50
@@ -309,7 +324,7 @@ def _iso(day) -> str:
 
 
 def _dense(rows) -> bool:
-    return (rows or 0) >= MIN_SETTLE_COVERAGE * EXPECTED_VENDOR_ROWS
+    return (rows or 0) >= MIN_SETTLE_COVERAGE * EXPECTED_SOURCE_ROWS
 
 
 def _complete(bins) -> bool:
@@ -384,8 +399,8 @@ def seed_device_state(stats: dict, today: date) -> dict:
     is evidence that the day was fetched and came back complete, so it is
     seeded as settled -- and the sweep re-tests it within the week, which is
     what keeps the shortcut honest. A thin partition is seeded *unsettled*: 288
-    rows is a day the five-minute poll covered on its own while the cloud still
-    holds it at one-minute resolution, which is worth asking for.
+    rows is a day the five-minute poll covered on its own while the source
+    still holds it at one-minute resolution, which is worth asking for.
     """
     state = empty_device_state()
     for day, stat in stats.items():
@@ -541,12 +556,12 @@ def is_settled(record: dict, day: date, today: date) -> bool:
 
 def record_fetch(state: dict, day: date, rows: int, bins: int = 0,
                  now: datetime = None) -> dict:
-    """Note what the vendor served for one day, and update its streak.
+    """Note what the source served for one day, and update its streak.
 
-    `rows` is the count the *vendor* returned, not the size of the partition.
+    `rows` is the count the *source* returned, not the size of the partition.
     The partition also grows from the five-minute poll, which says nothing
-    about whether the cloud has finished uploading; conflating the two would
-    let local poll activity settle a day the cloud never delivered.
+    about whether the source has finished receiving uploads; conflating the two
+    would let local poll activity settle a day the source never delivered.
     """
     now = now or datetime.now(timezone.utc)
     key = _iso(day)
@@ -567,7 +582,7 @@ def stale_days(state: dict, today: date, device=DEFAULT_DEVICE) -> list:
     """Days that never came back dense and are now past automatic retry.
 
     Reported every run rather than dropped. Most are simply older than the
-    vendor's retention, where retrying cannot help -- but the failure has to
+    source's retention, where retrying cannot help -- but the failure has to
     stay visible, because an invisible gap is the thing this module exists to
     prevent.
 
@@ -688,8 +703,8 @@ def plan_days(state: dict, today: date, recent_days: int = None,
 def coalesce(days, bridge: int = None) -> list:
     """Contiguous (start, end) ranges, merging runs separated by <= bridge.
 
-    The vendor takes a date range per call, so a plan of scattered days would
-    otherwise cost one login and one request each. Bridging one-day holes
+    A source is asked for a date range, so a plan of scattered days would
+    otherwise cost one call each. Bridging one-day holes
     trades a few unwanted rows for a whole request, and the merge is
     idempotent, so the extra day costs nothing but bytes.
     """
@@ -709,9 +724,9 @@ def coalesce(days, bridge: int = None) -> list:
 def rows_for(days, stats: dict) -> int:
     """What a set of days is worth in rows, from what is already on disk.
 
-    Used only to report the saving. The vendor's holdings for a past day are
+    Used only to report the saving. What the source holds for a past day is
     approximated by the partition, which for a backfilled day is precisely what
-    the vendor served.
+    the source served.
     """
     return sum(stats.get(_iso(d), {}).get("rows", 0) for d in days)
 
@@ -725,65 +740,42 @@ def expand(ranges) -> list:
 
 
 # --------------------------------------------------------------------------
-# The network edge. Everything above this line runs without it.
+# The edge: the only code here that talks to anything outside this machine --
+# and only through the contract, so what it talks to is somebody else's
+# decision. Everything above this line runs without a source at all.
 # --------------------------------------------------------------------------
 
-def _client():
-    from switchbotapi import SwitchBotClient
-
-    client = SwitchBotClient(_credential("email"), _credential("password"), region="eu")
-    client.login()
-    return client
+_SOURCE = None
 
 
-def find_vendor_device(client, device=DEFAULT_DEVICE) -> dict:
-    """The account entry for one of our devices, matched by type then by name.
+def source(reload: bool = False):
+    """The configured history source (src/history_source.py), resolved once.
 
-    The private API reports `device_type` as a numeric code for some families
-    and a Wo-name for others, and the entry is sometimes nested under
-    `device_detail`, so the type match reads both places and the device's own
-    `name_hints` are the fallback. If neither identifies exactly one device the
-    account's devices are listed in the error: a wrong MAC here would write one
-    sensor's history into the other's tree, which nothing downstream could
-    detect, so guessing is worse than failing.
+    Cached for the life of the process, because a run asks for several ranges
+    across two devices and a source that has to open a connection or a session
+    should do it once. `reload=True` drops the cache, which is what a test
+    changing the configuration wants.
     """
-    device = device_for(device)
-    entries = client.list_devices()
-
-    def type_of(entry):
-        return str(entry.get("device_type")
-                   or (entry.get("device_detail") or {}).get("device_type") or "")
-
-    wanted = {t.lower() for t in device.vendor_types}
-    matches = [e for e in entries if type_of(e).lower() in wanted]
-    if not matches:
-        matches = [e for e in entries
-                   if any(t.lower() in type_of(e).lower() for t in device.vendor_types)]
-    if not matches:
-        matches = [e for e in entries
-                   if any(h in str(e.get("device_name", "")).lower()
-                          for h in device.name_hints)]
-    if len(matches) == 1:
-        return matches[0]
-    listing = ", ".join(f"{e.get('device_name')!r} ({type_of(e)})" for e in entries)
-    raise RuntimeError(
-        f"{'no' if not matches else len(matches)} device(s) on this account "
-        f"match {device.slug!r} (types {device.vendor_types}, name hints "
-        f"{device.name_hints}); account holds: {listing}. Pass --mac to pin it.")
+    global _SOURCE
+    if _SOURCE is None or reload:
+        _SOURCE = history_source.resolve()
+    return _SOURCE
 
 
-# Kept because it named the one device this module used to know about.
-def _co2_device(client) -> dict:
-    return find_vendor_device(client, METER_PRO_CO2)
+def frame_from_rows(rows, device=DEFAULT_DEVICE,
+                    timestamps: str = "local-naive") -> pd.DataFrame:
+    """Source rows -> the frame the collector writes. Pure: no network, no source.
 
+    `rows` are mappings as the contract defines them, and `timestamps` is the
+    convention the source declared for them. Both devices and every source come
+    through this one function, so the zone handling and the future guard below
+    are written once: a second copy of either is a second place for the
+    two-hour error to live.
 
-def frame_from_rows(rows, device=DEFAULT_DEVICE) -> pd.DataFrame:
-    """Vendor rows -> the frame the collector writes. Pure: no network.
-
-    Shared by both endpoints, and the reason it is a separate function is the
-    timestamp handling below: every history method in the client formats its
-    points the same way, so a per-endpoint copy of this would be a per-endpoint
-    copy of the two-hour bug.
+    The default is "local-naive" because that is the convention of a store that
+    formats wall-clock strings and drops the offset -- the case that is wrong
+    when read naively, and so the case this function must never be careless
+    about. A configured source always passes its own declaration explicitly.
     """
     device = device_for(device)
     columns = list(device.channels)
@@ -791,24 +783,46 @@ def frame_from_rows(rows, device=DEFAULT_DEVICE) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
 
     frame = pd.DataFrame(rows)
-    # The client formats each point with .astimezone() before strftime, so the
-    # string is LOCAL wall-clock time carrying no offset. Labelling it UTC --
-    # which reads naturally and is wrong -- shifts the whole record by the
-    # local offset, and the error is invisible until a timestamp lands in the
-    # future. Localise to the machine's zone, then convert.
-    local = datetime.now().astimezone().tzinfo
-    frame["ts"] = (pd.to_datetime(frame["timestamp"])
-                   .dt.tz_localize(local, ambiguous="NaT", nonexistent="NaT")
-                   .dt.tz_convert("UTC"))
+    if timestamps == "aware":
+        # Offsets are carried, possibly several of them; parsing straight to
+        # UTC is the only thing that handles a mixture correctly.
+        stamps = pd.to_datetime(frame["timestamp"], utc=True)
+    else:
+        stamps = pd.to_datetime(frame["timestamp"])
+        if getattr(stamps.dt, "tz", None) is not None:
+            raise RuntimeError(
+                f"source declares its timestamps {timestamps!r} but they carry "
+                f"an offset; declare \"aware\" instead")
+        if timestamps == "local-naive":
+            # A naive wall-clock string reads exactly like UTC and is wrong by
+            # the local offset: labelling it UTC shifts the whole record, and
+            # the error is invisible until a timestamp lands in the future.
+            # Localise to the machine's zone first, then convert.
+            local = datetime.now().astimezone().tzinfo
+            stamps = stamps.dt.tz_localize(local, ambiguous="NaT",
+                                           nonexistent="NaT").dt.tz_convert("UTC")
+        elif timestamps == "utc-naive":
+            stamps = stamps.dt.tz_localize("UTC")
+        else:
+            raise ValueError(
+                f"unknown timestamp convention {timestamps!r}; expected one of "
+                f"{', '.join(history_source.CONVENTIONS)}")
+    frame["ts"] = stamps
     frame = frame.rename(columns={"temperature_c": "temp", "humidity_pct": "rh",
                                   "co2_ppm": "co2"})
-    # get_sensor_history never returns a CO2 field for any device, so a rack
-    # frame has two channels and asking for a third would be a KeyError rather
-    # than a column of nulls.
+    # A source need not serve every channel a device has -- a store with no CO2
+    # in it at all is ordinary -- so a missing key becomes a null column here
+    # rather than a KeyError below.
     for column in columns:
         if column not in frame:
             frame[column] = pd.NA
     frame = frame.set_index("ts")[columns]
+    # A source may hand back numbers as strings -- a CSV reader and a JSON
+    # payload both do -- and a column of strings is a schema change rather than
+    # a reading: it fails at the parquet write, after the merge has decided
+    # what to keep. Coerce here instead, so that anything which is not a
+    # measurement becomes a null and is dropped by the rule below.
+    frame = frame.apply(pd.to_numeric, errors="coerce")
     # For the CO2 meter, a row without CO2 is not worth keeping -- that is the
     # rule this module has always applied. For a device with no CO2 channel the
     # equivalent is a row with no measurement in it at all.
@@ -816,54 +830,58 @@ def frame_from_rows(rows, device=DEFAULT_DEVICE) -> pd.DataFrame:
                          how="all").sort_index()
     if frame.empty:
         return frame
-    # A reading in the future means the offset handling is wrong again.
+    # A reading in the future means the zone handling is wrong again. This is a
+    # check on the source's declaration rather than on this function: a
+    # declaration is a claim, and this is the cheap test that it holds.
     ahead = frame.index.max() - pd.Timestamp.utcnow()
     if ahead > pd.Timedelta(minutes=5):
         raise RuntimeError(
-            f"newest fetched reading is {ahead} in the future; the vendor's "
-            "timestamps are not being interpreted in the right zone")
+            f"newest fetched reading is {ahead} in the future; timestamps "
+            f"declared {timestamps!r} are not being interpreted in the right "
+            f"zone")
     return frame
 
 
-def fetch(start: date, end: date, device=DEFAULT_DEVICE, mac: str = None) -> pd.DataFrame:
-    """History for a date range, in the same shape the collector writes.
+def fetch(start: date, end: date, device=DEFAULT_DEVICE, device_id: str = None,
+          from_source=None) -> pd.DataFrame:
+    """History for one device over a date range, shaped as the collector writes it.
 
-    The only function here that touches the network. Everything deciding *what*
-    to ask for is a pure function of the ledger above, and everything shaping
-    what comes back is `frame_from_rows`, so both are testable against stored
-    parquet with no credentials at all.
+    The only function here that reaches outside this machine, and it does so
+    entirely through the contract: ask the configured source for rows, then
+    shape them with `frame_from_rows` under the convention that source
+    declared. Everything deciding *what* to ask for is a pure function of the
+    ledger above, so the whole policy stays testable against stored parquet
+    with no source configured at all.
 
-    The endpoint is chosen by the device: `get_meter_pro_history` for the Meter
-    Pro family, which is the only one carrying CO2, and `get_sensor_history`
-    for everything else. They differ in the response as well as the path -- the
-    latter has no `co2_ppm` key at all, for any device.
+    `start` is inclusive and `end` exclusive -- the caller adds the extra day.
+    `device_id` pins which record to read when the source's own matching is
+    not to be trusted; `from_source` substitutes a source for one call.
     """
     device = device_for(device)
-    client = _client()
-    if mac is None:
-        mac = find_vendor_device(client, device)["device_mac"]
-    call = (client.get_meter_pro_history if device.has_co2
-            else client.get_sensor_history)
-    rows = call(mac,
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"))
-    return frame_from_rows(rows, device)
+    from_source = source() if from_source is None else from_source
+    rows = from_source(device, start, end, device_id=device_id)
+    return frame_from_rows(rows, device, timestamps=from_source.timestamps)
 
 
 def fetch_ranges(ranges, device=DEFAULT_DEVICE, fetcher=None) -> pd.DataFrame:
     """Fetch each planned range and concatenate.
 
     `fetcher` is injected so a caller -- or a test -- can drive the whole
-    plan/merge/ledger path from stored parquet instead of the private API. It
-    is resolved here rather than captured as a default argument, so replacing
+    plan/merge/ledger path from stored parquet instead of the configured
+    source, and it is what `--device-id` uses to pin a record. It is resolved
+    here rather than captured as a default argument, so replacing
     `backfill.fetch` at module level is enough to take the network out of the
     picture entirely.
+
+    A fetcher is a shorter contract than a source: `(start, end, device) ->
+    DataFrame`, already shaped and already in UTC. `fetch` is the adapter
+    between the two.
     """
     device = device_for(device)
     fetcher = fetch if fetcher is None else fetcher
     frames = []
     for start, end in ranges:
-        # end + 1 because the vendor's range excludes the final day.
+        # end + 1 because the contract's range excludes the final day.
         frame = fetcher(start, end + timedelta(days=1), device)
         if len(frame):
             frames.append(frame)
@@ -877,8 +895,8 @@ def merge(history: pd.DataFrame, device=DEFAULT_DEVICE) -> dict:
     """Write history into the day partitions without displacing polled rows.
 
     Polled readings win on a tie: they were recorded by this pipeline, at a
-    known time, whereas a backfilled row has passed through the vendor's cloud
-    and the phone's clock.
+    known time, whereas a backfilled row has passed through the source and
+    whatever clock wrote it there.
 
     `device` selects the tree. Dedup on the timestamp alone stays correct here
     only because one tree holds one device -- with both sensors in a shared
@@ -918,7 +936,7 @@ def report_plan(plan: dict, ranges: list, stats: dict, today: date,
     # The comparison the change is judged on: what the old unconditional
     # rolling window would have pulled, against what this plan pulls. Row
     # counts come from the partitions, which for a backfilled day are exactly
-    # what the vendor served.
+    # what the source served.
     old_window = [today - timedelta(days=i) for i in range(OLD_WINDOW_DAYS + 1)]
     before = rows_for(old_window, stats)
     after = rows_for(expand(ranges), stats)
@@ -929,7 +947,7 @@ def report_plan(plan: dict, ranges: list, stats: dict, today: date,
 def run_device(device, state: dict, args, today: date, fetcher=None) -> int:
     """Plan, fetch, merge and record one device. Mutates its sub-ledger.
 
-    Returns 0 on success and 1 if the vendor served nothing, which is what the
+    Returns 0 on success and 1 if the source served nothing, which is what the
     single-device version returned in the same situations. Exceptions are left
     to the caller, which catches them per device so that one sensor cannot cost
     another its repair.
@@ -980,8 +998,9 @@ def run_device(device, state: dict, args, today: date, fetcher=None) -> int:
     requested = expand(ranges)
     history = fetch_ranges(ranges, device, fetcher=fetcher)
     if history.empty:
-        print(f"  {device.slug}: the vendor returned no rows. Open the device's "
-              f"history screen in the app with Bluetooth connected, then retry.",
+        print(f"  {device.slug}: the history source returned no rows. If it is "
+              f"fed by an uploader that syncs on demand, it may simply not have "
+              f"received anything lately; check the source, then retry.",
               file=sys.stderr)
         # Record the zero rather than leaving a stale dense count in place: a
         # day that comes back empty must not keep looking settled.
@@ -1020,9 +1039,13 @@ def main() -> int:
     parser.add_argument("--device", action="append", metavar="SLUG",
                         help=f"restrict to one sensor (repeatable); "
                              f"default: all of {', '.join(sorted(DEVICES))}")
-    parser.add_argument("--mac", metavar="MAC",
-                        help="pin the vendor MAC instead of matching by device "
-                             "type or name; only valid with a single --device")
+    # --mac is the older name, kept working: the handle a source wants is
+    # whatever identifies a record to it -- an address, a file stem, a key --
+    # and that is not always a MAC.
+    parser.add_argument("--device-id", "--mac", dest="device_id", metavar="ID",
+                        help="pin the source's own handle for this sensor "
+                             "instead of letting it match by type or name; "
+                             "only valid with a single --device")
     parser.add_argument("--reset-state", action="store_true",
                         help="rebuild the ledger from the partitions on disk")
     parser.add_argument("--migrate-state", action="store_true",
@@ -1034,9 +1057,9 @@ def main() -> int:
 
     today = datetime.now(timezone.utc).date()
     devices = [device_for(slug) for slug in (args.device or sorted(DEVICES))]
-    if args.mac and len(devices) != 1:
-        parser.error("--mac pins one device's MAC, so it needs exactly one "
-                     "--device")
+    if args.device_id and len(devices) != 1:
+        parser.error("--device-id pins one device's handle at the source, so "
+                     "it needs exactly one --device")
 
     if args.migrate_state:
         return migrate_state()
@@ -1052,10 +1075,23 @@ def main() -> int:
         return 0
 
     state = load_state(today=today)
-    # A pinned MAC skips device discovery entirely, for the case where the
-    # rack sensor's device_type is not one this build recognises.
-    fetcher = (None if not args.mac else
-               lambda start, end, device: fetch(start, end, device, mac=args.mac))
+    # A pinned handle skips whatever matching the source would have done, for
+    # the case where it cannot identify a sensor on its own.
+    fetcher = (None if not args.device_id else
+               lambda start, end, device: fetch(start, end, device,
+                                                device_id=args.device_id))
+
+    # Resolve the source once, before any device runs, so a missing or broken
+    # configuration is one message rather than one per device -- and so it is
+    # not mistaken for a fetch failure. --plan never gets this far: it decides
+    # everything from the ledger and the partitions, and must keep working with
+    # no source configured at all.
+    if not args.plan:
+        try:
+            print(f"history source: {source()}")
+        except history_source.NotConfigured as exc:
+            print(exc, file=sys.stderr)
+            return 2
 
     failed, empty = [], []
     try:

@@ -62,6 +62,24 @@ if git diff --cached -U0 -- '*.py' '*.sh' \
     fail=1
 fi
 
+# A weekday name or a wall-clock time in prose or source. The date rule above
+# catches calendar literals; this catches the other way the same fact travels --
+# "the Tuesday window", "the room emptied at 11:11" -- invented, because this
+# file is neither .py nor .md and the rule cannot catch itself. That is the
+# class of detail deliberately moved out of source into a gitignored file and
+# renamed to period_a..period_e, and it came back through .py and .md, which no
+# rule covered. Illustrative hours in usage examples and scheduling are
+# excluded, as are day-of-week constants in upper case.
+if git diff --cached -U0 -- '*.py' '*.md' \
+    | grep -E '^\+' \
+    | grep -vE '^\+\+\+|%H|%M|HH:MM|hours\[|--at |05:30|iloc' \
+    | grep -vE '\b(MON|TUES|WEDNES|THURS|FRI|SATUR|SUN)DAY\b' \
+    | grep -qiE '\b(mon|tues|wednes|thurs|fri|satur|sun)days?\b|\b[0-2][0-9]:[0-5][0-9]\b'; then
+    echo "BLOCKED  a staged line names a weekday or a clock time"
+    echo "         use the anonymised period names; see the README"
+    fail=1
+fi
+
 # Explicit belt-and-braces for the one credential shape this project uses.
 if git diff --cached -U0 | grep -qE '^\+.*SWITCHBOT_(TOKEN|SECRET)\s*[=:]'; then
     echo "BLOCKED  a staged line assigns a SwitchBot credential"

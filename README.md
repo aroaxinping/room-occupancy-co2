@@ -72,7 +72,7 @@ a leaky random one.
 ## Four assumptions that broke
 
 **1. Constant outdoor concentration.** Assuming `C_out = 415 ppm` (outdoor air)
-put 0.42 phantom people in a demonstrably empty room at 4 a.m. The room does not
+put 0.42 phantom people in a demonstrably empty room in the small hours. The room does not
 ventilate against the street; it ventilates against the rest of the building.
 Fitting `C_out` per decay episode is not identifiable — asymptote and decay rate
 trade off over a short window, and the optimiser ran to its bounds on 25% of
@@ -126,20 +126,22 @@ window analysed was not the window it was labelled with: an interval recorded
 as the occupied morning was in fact the two hours before anyone arrived. The
 conclusions may survive re-measurement, but they are not evidence until they
 have been recomputed. The cause and the fix are in `src/backfill.py`: the
-vendor's client formats each point in local wall-clock time with no offset
-attached and the ingestion labelled those strings UTC, which reads naturally,
-is wrong, and stays invisible until a timestamp lands in the future.
+history it was repaired from formats each point in local wall-clock time with
+no offset attached and the ingestion labelled those strings UTC, which reads
+naturally, is wrong, and stays invisible until a timestamp lands in the future.
+A source now has to declare which convention its timestamps use, and the guard
+that caught this one is applied to all of them.
 
 What still stands, because none of it came from the backfill: the sealed rate
 of 0.39 from five months of overnight decays, the steady-state inversion above
 that put occupied hours near 1.05 ACH, and the window measurement below, which
 predates the backfill entirely.
 
-## Validation without labels, and why it does not work
+## Validation: the metric that broke, and the first real one
 
-There are no occupancy labels covering the record, so the model was checked
-against windows whose occupancy the occupant stated: certain hours on certain
-weekdays, held to be empty or to hold one person.
+There are no occupancy labels covering most of the record, so the model was
+checked against windows whose occupancy the occupant stated: certain hours on
+certain days of the week, held to be empty or to hold one person.
 
 **That check is worthless, and every accuracy figure derived from it has been
 withdrawn.** The windows are defined as hour-of-day crossed with day-of-week,
@@ -164,35 +166,60 @@ the estimate is not nonsense. An empty period reading near zero and an occupied
 one reading near one is worth knowing. Turning that into a percentage was the
 error.
 
-Settling it properly needs labels recorded as occupancy changes, which
-`src/label.py` collects and which now exist for a handful of hours. A power
-calculation on the window approach is decisive: detecting a three-point
-difference would need about 193 confirmed Saturdays, and the record holds
-eleven. Roughly twenty to thirty labelled days would answer what fifteen
-summers of window labels could not.
+### Scored against real labels, once
 
-## A thermal channel, unvalidated
+`src/label.py` records occupancy changes as they happen, and one day of them now
+exists. Aligned to the readings it gives 250 scoreable samples -- 131 with the
+room empty, 64 with one person, 55 with two. It is the first time anything here
+has been measured against occupancy that was written down rather than argued
+for.
 
-`src/thermal.py` and `joint.decode_thermal` add a second observable: in warm
-weather someone arriving switches on the air conditioning, so the room departs
-from free thermal relaxation. It is behavioural rather than metabolic -- a
-person contributes about 100 W to a room whose budget is dominated by a
-continuously running server rack -- and it therefore does not transfer to a
-room where nobody uses air conditioning.
+| | |
+|---|---|
+| specificity, empty called empty | 87.0% (114/131) |
+| sensitivity, occupied called occupied | 79.0% (94/119) |
+| accuracy, present vs absent | 83.2% |
+| accuracy, exact count over {0, 1, 2} | 78.4% |
 
-**The observable is real. The improvement is not established.** At a matched
-hour, comparing a confirmed-occupied weekday against a confirmed-empty Saturday,
-the rate of temperature change differs by 2.56 C/h with a day-level permutation
-p below 1e-4, and it survives every artefact test put to it. The mechanism made
-a prediction before it was tested -- no compressor runs in winter, so the signal
-should vanish -- and in cold months the same comparison gives 0.02 C/h, p=0.19.
+Broken out by true occupancy, which the windows could not test at all:
 
-But the decoder gain reported for it was measured on the broken metric above.
-On metrics a calendar prior cannot win, the gain is 1.4 points with a 95%
-interval spanning [-7.3, +10.3], and a weight chosen on one half of the record
-scores worse on the held-out half. Added to a calendar prior it subtracts two to
-three points. The channel is kept, off the default path, as a documented
-attempt -- the same status as `joint.py`.
+| truth | called correctly | where the rest go |
+|---|---|---|
+| 0 | 114 / 131 (87.0%) | 4 read as 1, 13 as 2 |
+| 1 | 59 / 64 (92.2%) | 5 read as 0 |
+| 2 | 23 / 55 (41.8%) | 20 read as 0, 12 as 1 |
+
+Two people is where it breaks, and the errors do not land next door at one
+person: twenty of the fifty-five read the room as empty.
+
+**This is one day.** One day, one household, one season, and the truth is the
+occupant's own account of their own movements written down as it happened.
+Nothing generalises from it. What it does is replace a metric that could not be
+lost with one that can be.
+
+It does not yet replace it with a metric a calendar clearly loses. A rule reading
+only hour and day-of-week scores 76.4% on these same samples against the model's
+83.2% -- but the day falls inside the one reference period the occupant recorded
+as genuinely variable, and reading that period as occupied rather than empty
+takes the same calendar rule to 86.0%, ahead of the model. Which reading is the
+fair one is not something a single day can settle. The claim here is that the
+model is finally being scored against something real, not that it has beaten
+anything.
+
+### What would settle it
+
+More labels, and not many. The window approach cannot be rescued by patience.
+On the reference period confirmed empty the model scores 1.00 on most days and
+collapses on a few, so per-day accuracy across the 21 such days in the record has
+a standard deviation of 0.22; comparing two model variants day-paired gives a
+difference with a standard deviation of 0.33. Detecting a three-point difference
+at 80% power therefore needs on the order of a thousand such days. The record
+holds 21, and accumulates them at roughly fifty a year.
+
+One labelled day produced 250 scoreable samples spanning all three states,
+including 55 with two people -- of which five months of window labels contain
+exactly none. Twenty to thirty labelled days would answer in a month what the
+window approach could not answer in twenty years.
 
 ## Sensitivity to the generation rate
 
@@ -246,60 +273,125 @@ L/h is consistent with twenty-one different combinations of sex, mass and
 activity. This is the same identifiability problem as `k` versus `N`, and no
 amount of extra data from this one sensor resolves it.
 
-## A second channel, and what it actually detects
+## A second channel: four attempts, and why each failed
 
 The CO2 channel cannot separate CO2 being generated now from CO2 still clearing
-from last night, and that is where the model's errors concentrate. Room
-temperature responds on a different timescale, so `src/thermal.py` adds it as a
-second emission term to the same Viterbi decode.
+from hours ago, and that is where its errors concentrate. Temperature responds
+on a different timescale, so it is the obvious place to look for a second
+observable. Four ways of using it have been tried. None of them is load-bearing
+now, and the reasons are physical rather than a matter of tuning.
 
-**It detects an air conditioner being switched on. It does not detect body
-heat.** An occupied room here runs 4-5 °C *cooler* than its own uncooled level,
-not warmer; what is tracked is a decision somebody makes on the way in. So the
-observable is not the temperature deficit but the departure from free
-relaxation — the same mass-balance move as the occupancy model, one storey down
-— and the channel gates itself off where the record shows no cooling in use,
-which leaves it silent for half the year. It cannot count: one person and two
-switch the compressor identically.
+**1. Temperature as body heat. Dead on the room's thermal budget.** A person
+adds about 100 W. The room also contains a server rack that never stops, and a
+second sensor placed inside it holds a steady 1.5-2.1 C above the room, month
+after month, with a standard deviation under half a degree. A continuous load
+that stable sets the budget; one occupant is a perturbation on it. The labelled
+day settles the direction outright: the room reads 26.0 C while occupied and
+29.3 C while empty. Occupancy here makes the room *colder*, not warmer.
 
-It takes accuracy against the confirmed periods from 72.5% to 82.0%, and the
-gain lands where it was aimed: the weekday small hours go from 67.8% correct to
-85.3%. It is not free — the confirmed-empty weekend window falls from 98.9% to
-90.9%, which is air conditioning left running in an empty room, a failure mode
-the occupant's own labels confirm. And being a behavioural proxy rather than a
-physical law, it would carry no information at all in a room where nobody uses
-cooling.
+**2. Temperature as air conditioning. The observable is real; the gain is not
+established.** It is colder because somebody switches the cooling on when they
+arrive, so what temperature tracks is a decision rather than a metabolism. The
+observable itself holds up: at a matched hour, comparing a reference period
+confirmed occupied against one confirmed empty, the rate of temperature change
+differs by 2.56 C/h with a day-level permutation p below 1e-4, and it survives
+every artefact test put to it. The mechanism predicted its own limit before it
+was tested -- no compressor runs in the cold months, so the signal should vanish
+-- and there the same comparison gives 0.02 C/h, p=0.19. So `src/thermal.py`
+tracks the departure from free thermal relaxation rather than the temperature
+itself, the same mass-balance move as the occupancy model one storey down, and
+gates itself off wherever the record shows no cooling in use.
+
+What is not established is that any of it helps the decoder. The improvement
+once claimed for this channel was measured on the broken metric above and is
+withdrawn with the rest. On metrics a calendar prior cannot win, the gain is 1.4
+points with a 95% interval spanning [-7.3, +10.3]; a weight chosen on one half
+of the record scores worse on the held-out half; and added to a calendar prior
+it subtracts two to three points. The channel cannot count in any case -- one
+person and two switch the compressor identically -- and being behavioural rather
+than physical it would carry nothing at all in a room where nobody uses cooling.
+Its known failure mode is cooling left running in an empty room, which the
+occupant's own labels confirm happens. It is kept off the default path as a
+documented attempt, the same status as `joint.py`.
+
+**3. The rack-minus-room difference as a ventilation measure. Dead on the rack's
+own fans.** If the rack is a constant heat source, the difference between it and
+the room should widen and narrow as the room's air exchange does, which would
+measure `k` directly and break the identifiability problem the whole model runs
+on. It does not. The difference that makes attempt 1 fail is exactly what makes
+this fail too: it is near-constant. Across hour of day its median spans 1.70 to
+1.90 C in total, while the ventilation rate over those same hours varies by
+severalfold. It correlates -0.15 with CO2, -0.10 with CO2 excess, and +0.22 with
+the estimated ventilation rate -- the largest of the three and still far too weak
+to invert. The physical reason is that the rack's fans dominate its heat exchange
+with the room: it is cooled by a forced draught that does not care what the
+window is doing. The rack sensor is worth keeping as a reference for room
+temperature; it is not a ventilation instrument.
+
+*The earliest rows of that sensor's record are excluded from all of the above.*
+They sit roughly 8 C *below* the room rather than above it, which is not how a
+sensor inside a rack behaves.
+
+**4. Solving `C_out`, `k` and `N` together by alternation. Dead on every period
+that has an expected value.** Not a thermal attempt, but it failed the same way:
+plausible in principle, worse in measurement. Estimating `C_out` from
+believed-empty samples, solving `k` from the mass balance given the current
+occupancy, decoding, and repeating is `states.solve`, and it moves every
+reference period away from its known value -- the two confirmed empty rise from
+0.07 and 0.31 toward 0.15 and 0.40, and the one confirmed to hold a person falls
+from 0.89 to 0.79. `states.decode` is what runs by default for that reason.
 
 ## Open problems
 
-**The night residual.** 0.34 people in a room known to be empty, in the small
-hours. It survived both the `C_out` and the `k` corrections; the thermal
-channel above cuts it to 0.16, but by adding an observable rather than by
-fixing the estimator. Simulation supplied the mechanism: `estimate_c_out` is
-biased low overnight even with occupancy held at zero, because a low quantile
-of a neighbourhood spanning a rising signal lands near that neighbourhood's
-floor rather than at its centre. That is a property of the estimator, not of
-the room, and it has not been fixed.
+**Counting two people. 41.8% correct**, on the one labelled day above, and the
+errors do not go to one person -- twenty of the fifty-five two-person samples
+read as an empty room. The decoder does not know it is guessing, either: the
+margin between its chosen state and its runner-up is *higher* where the truth is
+two (median 0.27) than where it is nought or one (0.15, 0.12), and the
+lowest-margin third of samples is 19.3% two-person against a 22.0% base rate. So
+there is no doubt signal to threshold on and no cheap abstention to build. The
+model is confidently wrong, which is the expensive kind.
 
-**Weekday/weekend discrimination fails.** The model's ranking of which days
-hold two people contradicts the occupant's own account, and is not fixable by
-tuning without overfitting to a verbal account. That is why the next step is
-labels rather than parameters.
+**The night plateau.** The room does not come back down to its own estimated
+asymptote overnight: across the small hours the median reading is about 740 ppm
+against an estimated `C_out` near 615, which the inversion reads as roughly a
+third of a person in a room known to be empty. It survived both the `C_out` and
+the `k` corrections. Simulation supplies one mechanism -- `estimate_c_out` is
+biased low overnight even with occupancy held at zero, because a low quantile of
+a neighbourhood spanning a rising signal lands near that neighbourhood's floor
+rather than at its centre -- but that is a property of the estimator, and whether
+it accounts for the whole plateau has not been established. Nothing here rules
+out a real, unattributed source in the room.
 
-**Counting is not validated.** The estimate tracks occupancy well in aggregate,
-but claiming accuracy at "1 vs 2 people" needs ground truth. That is now being
-collected rather than simply absent: `src/label.py` records occupancy state
-changes as they happen and the first entries exist, and `src/simulate.py`
-integrates the same mass balance forward from a known schedule to measure what
-the pipeline recovers. The simulator bounds the error from estimation only — it
-assumes the physics the model assumes — and neither source has yet produced
-enough hours to put a number on 1 versus 2.
+**Both are the same problem.** A slow rise is equally well explained by more
+people or less ventilation, and the CO2 series alone cannot say which: `k` and
+`N` are not separately identifiable from it. That is what makes two people look
+like an empty room with the door shut, and an empty room look like a person who
+never left. Every attempt above -- the joint decode, the alternating solver, the
+thermal channel, the rack delta -- was an attempt to bring in something outside
+the CO2 series to break it, and none of them did. It is the same shape as the
+generation-rate result further up, where activity and body mass could not be
+separated either.
+
+**Day-type discrimination fails.** The model's ranking of which days hold two
+people contradicts the occupant's own account, and is not fixable by tuning
+without overfitting to a verbal account. That is why the next step is labels
+rather than parameters.
+
+`src/simulate.py` integrates the same mass balance forward from a known schedule
+to measure what the pipeline recovers, and bounds the error from estimation
+alone -- it assumes the physics the model assumes, so it cannot see any of this.
 
 ## Repairing the record
 
-The collector is no longer the only source. The vendor's own history is
-reachable through a private-API client, so `src/backfill.py` finds days the
-poll under-covered and merges what the cloud holds. The first run recovered
+The collector is no longer the only source. Stored history exists elsewhere --
+an export, a database, an account that keeps readings the poll never saw -- so
+`src/backfill.py` finds days the poll under-covered and merges what that store
+holds. Which store is configuration rather than an import: `src/history_source.py`
+states the contract -- rows of timestamp, temperature, humidity and CO2 for one
+device over a date range, plus the timezone convention those timestamps use --
+and resolves the source at run time from a file beside the data. The first run
+recovered
 124,363 rows at one-minute resolution with no gap longer than six hours across
 three months — including both multi-week holes the original export had, which
 had been treated as permanent since the start of the project.
@@ -325,8 +417,8 @@ fixed window; the re-window is what that safety margin costs, and every run
 prints both figures. `src/backfill.py` argues the whole policy through, case by
 case.
 
-Retention is finite: the cloud served roughly three months for this account,
-not the full five, so the original export remains the only copy of the earliest
+Retention is finite: the source used here held roughly three months, not the
+full five, so the original export remains the only copy of the earliest
 period. The poll also stays primary, because it depends on nothing but this
 machine. But an hour the collector misses is now repairable rather than lost,
 which was the architecture's weakest assumption.
@@ -390,8 +482,9 @@ And the collection side:
 src/ingest.py       vendor API polling, credentials from the Keychain
 src/pipeline.py     scheduled poll, one partition tree per device, staleness
                     and bin coverage
-src/backfill.py     repairing gaps from the vendor's stored history, on a
-                    per-device ledger
+src/backfill.py     repairing gaps from stored history, on a per-device ledger
+src/history_source.py   what a history source has to answer, and how one is
+                    configured
 src/label.py        recording real occupancy, so the estimate can be scored
 src/simulate.py     a synthetic room, to measure what the real one cannot
 install-scheduler.sh + scheduler.plist.template   launchd agent, the poll
@@ -403,11 +496,12 @@ broke and the audits that caught them, in the order it happened.
 
 ## Reproducing this
 
-`pip install -r requirements.txt`. `src/backfill.py` additionally needs a
-private-API client deliberately *not* listed there: it takes an account email
-and password rather than a scoped token, so it is worth installing consciously
-and pinned to a commit rather than pulled in by a blanket install. Every other
-module works without it.
+`pip install -r requirements.txt`, and that is all of it: nothing here depends
+on a client for any particular sensor service. `src/backfill.py` repairs gaps
+from whatever history source is configured for it; `src/history_source.py` says
+what such a source has to answer and where the configuration lives, and a
+directory of exported CSV is one of them, built in. Everything except the
+repair runs with no source configured at all.
 
 The sensor readings are not in the repository and cannot be, so the notebooks
 need a directory of their own data; `src/paths.py` says where it is looked for,

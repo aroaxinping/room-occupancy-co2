@@ -10,7 +10,7 @@ labels that can settle it.
 The CO2 channel cannot tell CO2 that is being generated now from CO2 that is
 still clearing from last night. Both look like "elevated and falling slowly",
 and that one ambiguity is where the model's errors concentrate: the weekday
-small hours score 67.8% against a Saturday at the same hours scoring 98.9%,
+small hours score far worse than a reference window at the same hours,
 both confirmed empty. Temperature responds on a different timescale, so if it
 carries occupancy information anywhere it should carry it there.
 
@@ -70,9 +70,9 @@ N=2 and the counting stays entirely with the CO2 channel.
 
 The known failure is the converse: **air conditioning left running in an empty
 room.** It is not hypothetical -- the occupant's own labels for one recorded day
-have the room emptying at 14:02 with the unit still set to 26 C, and the
+have the room emptying while the unit is still set to a low temperature, and the
 temperature holds flat for the next hour with nobody in it. Two of the six warm
-Saturdays in this record look the same way in the small hours, and they are
+reference days in this record look the same way in the small hours, and they are
 where this channel does its only damage to the confirmed numbers.
 """
 import numpy as np

@@ -244,7 +244,7 @@ if __name__ == "__main__":
               f"{r['accuracy']:7.1%}")
 
     print("\nthe windows confirmed empty, separately -- the weekday small hours "
-          "are\nwhat this channel is aimed at, and the Saturday is what it costs:")
+          "are\nwhat this channel is aimed at, and the reference window is what it costs:")
     b, a = _confirmed(before, spec), _confirmed(after, spec)
     for n in b["per_window"]:
         print(f"  {n:10s} correct {b['per_window'][n]:6.1%} -> "

@@ -104,7 +104,7 @@ RACK = Device(
     label="Rack sensor (WoIOSensor)",
     root="live-rack",
     channels=("temp", "rh"),
-    # The private API reports some device types as Wo-names and others as
+    # A history source may report device types as vendor names and others as
     # numeric codes, and this one has never been seen from here -- so the match
     # is deliberately loose, falls back to the device name, and can be
     # overridden with an explicit MAC (see src/backfill.py --mac).
