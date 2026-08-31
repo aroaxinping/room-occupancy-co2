@@ -1,0 +1,30 @@
+# Data lives outside the repository entirely (see src/paths.py). This rule is
+# defence in depth for anything copied back in by hand.
+data/
+logs/
+# any quarantined or partitioned reading store, whatever it is named
+live*/
+*.parquet
+*.csv
+*.jsonl
+# pipeline bookkeeping, wherever it is written from
+*_state.json
+# the windows the period_a..period_e naming exists to hide
+validation_periods.json
+*.out
+*.err
+
+# Credentials live in the macOS Keychain and never on disk.
+.env
+*.env
+credentials*.json
+*secret*
+*token*
+
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+
+# Notebooks are committed with outputs; the pre-commit hook refuses any that
+# contain a date or weekday.

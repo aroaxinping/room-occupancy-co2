@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent for the ingestion poller. Install with:
+
+      ./install-scheduler.sh <deviceId>
+
+  launchd rather than cron: it relaunches a job whose process dies, survives
+  reboots, and runs a missed job once the machine wakes. The two ~26-day holes
+  in the original record are what a silently failing scheduled job looks like
+  after the fact.
+
+  No credentials appear here (the poller reads them from the Keychain), and
+  the deviceIds are substituted at install time, so this template stays free of
+  anything identifying.
+
+  One agent polls both sensors: src/pipeline.py takes a bare deviceId for the
+  CO2 meter and slug=deviceId for any other device, and a failure on one does
+  not cost the other its reading. A second agent would double the wake-ups to
+  no purpose.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>          <string>com.local.room-occupancy-co2</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__REPO__/src/pipeline.py</string>
+        <string>__DEVICE_ID__</string>
+__EXTRA_TARGETS__
+    </array>
+    <key>StartInterval</key>  <integer>300</integer>
+    <key>RunAtLoad</key>      <true/>
+    <!-- stdout duplicates the JSON log, which lives with the data rather than
+         in the repository: it records when readings were taken. -->
+    <key>StandardOutPath</key>   <string>__DATA__/logs/launchd.out</string>
+    <key>StandardErrorPath</key> <string>__DATA__/logs/launchd.err</string>
+    <key>ProcessType</key>    <string>Background</string>
+</dict>
+</plist>

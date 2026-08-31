@@ -1,0 +1,94 @@
+#!/bin/sh
+# Blocks commits that carry credentials or sensor data.
+#
+# The data lives outside the repository and secrets live in the Keychain, so
+# neither should reach a commit. This is the backstop for when one of those is
+# bypassed -- a file copied in, a `git add -f`, an edited .gitignore.
+#
+# Enable with:  git config core.hooksPath .githooks
+
+fail=0
+git diff --cached --name-only -z --diff-filter=ACM > /tmp/.staged.$$
+[ -s /tmp/.staged.$$ ] || { rm -f /tmp/.staged.$$; exit 0; }
+
+# -z plus read -d '' so paths containing spaces are handled correctly.
+while IFS= read -r -d '' f; do
+    case "$f" in
+        *.env|.env*|*credential*|*secret*|*token*|*.pem|*.key|*.p12)
+            echo "BLOCKED  $f  -- looks like a credential"; fail=1 ;;
+        *.json)
+            # No JSON belongs in this repo, and a downloaded switchbot.json or
+            # keys.json would not match the credential names above.
+            echo "BLOCKED  $f  -- JSON is blocked by default; allowlist it here if genuinely needed"; fail=1 ;;
+        *.parquet|*.csv|*.tsv|*.dat|*.jsonl|*.sqlite|*.db|data/*|logs/*|*.out|*.err)
+            echo "BLOCKED  $f  -- sensor data belongs outside the repository"; fail=1 ;;
+        *.ipynb)
+            # Notebooks are allowed, but their saved outputs are where a date
+            # would hide: an axis label, a rendered dataframe, a printed index.
+            # Anything date-shaped in the file refuses the commit.
+            # Only source and output text are scanned. Checking the raw file
+            # would also scan base64 image payloads, whose alphabet can spell a
+            # weekday by chance -- a block on an innocent notebook is how an
+            # author learns to reach for --no-verify.
+            if ! python3 "$(dirname "$0")/check_notebook.py" "$f"; then
+                fail=1
+            fi ;;
+    esac
+done < /tmp/.staged.$$
+rm -f /tmp/.staged.$$
+
+# Opaque runs of 32+ chars: a SwitchBot secret is 32, the token is longer.
+# Base64 image payloads are excluded so that a committed plot does not train
+# the author to reach for --no-verify.
+if git diff --cached -U0 \
+    | grep -E '^\+' \
+    | grep -vE 'https?://|sha256|^\+\+\+|"image/(png|jpeg)"|^\+\s*"[A-Za-z0-9+/]{60,}' \
+    | grep -qE '[A-Za-z0-9+/]{32,}={0,2}'; then
+    echo "BLOCKED  a staged line contains a long opaque string that may be a token"
+    echo "         review with: git diff --cached"
+    fail=1
+fi
+
+# A date literal in source. This class was missed until an audit found the
+# record's first day hardcoded in a module: the filename rules do not apply, and
+# a compact YYYYMMDD is too short for the opaque-string threshold. Bounds and
+# defaults belong in the data or as durations, not as a day someone can read.
+if git diff --cached -U0 -- '*.py' '*.sh' \
+    | grep -E '^\+' \
+    | grep -vE '^\+\+\+|%Y|%m|%d|YYYY|yyyy|\\d\{|2020-01-06' \
+    | grep -qE "['\"]20[0-9]{2}-?(0[1-9]|1[0-2])-?(0[1-9]|[12][0-9]|3[01])|date\(\s*20[0-9]{2}\s*,"; then
+    echo "BLOCKED  a staged source line contains a literal calendar date"
+    echo "         derive the bound from the data, or express it as a duration"
+    fail=1
+fi
+
+# A weekday name or a wall-clock time in prose or source. The date rule above
+# catches calendar literals; this catches the other way the same fact travels --
+# "the Tuesday window", "the room emptied at 11:11" -- invented, because this
+# file is neither .py nor .md and the rule cannot catch itself. That is the
+# class of detail deliberately moved out of source into a gitignored file and
+# renamed to period_a..period_e, and it came back through .py and .md, which no
+# rule covered. Illustrative hours in usage examples and scheduling are
+# excluded, as are day-of-week constants in upper case.
+if git diff --cached -U0 -- '*.py' '*.md' \
+    | grep -E '^\+' \
+    | grep -vE '^\+\+\+|%H|%M|HH:MM|hours\[|--at |05:30|iloc' \
+    | grep -vE '\b(MON|TUES|WEDNES|THURS|FRI|SATUR|SUN)DAY\b' \
+    | grep -qiE '\b(mon|tues|wednes|thurs|fri|satur|sun)days?\b|\b[0-2][0-9]:[0-5][0-9]\b'; then
+    echo "BLOCKED  a staged line names a weekday or a clock time"
+    echo "         use the anonymised period names; see the README"
+    fail=1
+fi
+
+# Explicit belt-and-braces for the one credential shape this project uses.
+if git diff --cached -U0 | grep -qE '^\+.*SWITCHBOT_(TOKEN|SECRET)\s*[=:]'; then
+    echo "BLOCKED  a staged line assigns a SwitchBot credential"
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo
+    echo "Commit refused. If this is a false positive, commit with --no-verify"
+    echo "after confirming by eye that nothing sensitive is staged."
+    exit 1
+fi
