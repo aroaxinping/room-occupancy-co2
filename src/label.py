@@ -24,7 +24,7 @@ home was empty as directly as the readings do.
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pandas as pd
 
@@ -92,7 +92,8 @@ def as_series(index: pd.DatetimeIndex, max_hours: float = 12.0) -> pd.Series:
 def main() -> int:
     p = argparse.ArgumentParser(prog="label", description=__doc__.split("\n")[0])
     p.add_argument("occupants", nargs="?", type=int, help="how many people are in the room now")
-    p.add_argument("--at", metavar="HH:MM", help="time today, if recording it late")
+    p.add_argument("--at", metavar="[YYYY-MM-DD]HH:MM",
+                   help="when it changed, if recording it late; a bare time means today")
     p.add_argument("--note")
     for flag in FLAGS:
         p.add_argument(f"--{flag.replace('_', '-')}", action="store_true")
@@ -121,8 +122,19 @@ def main() -> int:
 
     at = None
     if args.at:
-        hour, minute = (int(x) for x in args.at.split(":"))
+        # A bare HH:MM means today. Recalling something from an earlier day is
+        # common enough -- the change is remembered after the fact -- that it
+        # needs the date form rather than a hand-edit of the store.
+        stamp, _, clock = args.at.rpartition(" ") if " " in args.at else ("", "", args.at)
+        if not stamp:
+            stamp, _, clock = args.at.rpartition("T") if "T" in args.at else ("", "", args.at)
+        hour, minute = (int(x) for x in clock.split(":"))
         at = _now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if stamp:
+            day = date.fromisoformat(stamp)
+            at = at.replace(year=day.year, month=day.month, day=day.day)
+        if at > _now():
+            p.error(f"{at:%Y-%m-%d %H:%M} is in the future")
 
     entry = record(args.occupants, at=at, note=args.note,
                    **{f: getattr(args, f) for f in FLAGS})
