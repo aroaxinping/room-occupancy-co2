@@ -23,7 +23,7 @@ Measured on this repository's own definitions:
 A metric a calendar wins outright cannot distinguish a sensor from a timetable.
 It was not measuring whether the room's air reveals people; it was measuring
 whether the model agrees with the assumptions used to write the windows. Every
-specificity, sensitivity and accuracy this README previously reported --
+specificity, sensitivity and accuracy this project previously reported --
 including the improvement claimed for the thermal channel -- rests on it and
 none of them survive.
 
@@ -116,7 +116,7 @@ like an empty room with the door shut, and an empty room look like a person who
 never left. Every attempt above -- the joint decode, the alternating solver, the
 thermal channel, the rack delta -- was an attempt to bring in something outside
 the CO2 series to break it, and none of them did. It is the same shape as the
-generation-rate result further up, where activity and body mass could not be
+generation-rate result in [what broke](failures.md), where activity and body mass could not be
 separated either.
 
 **Day-type discrimination fails.** The model's ranking of which days hold two

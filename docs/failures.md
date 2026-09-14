@@ -67,8 +67,8 @@ that caught this one is applied to all of them.
 
 What still stands, because none of it came from the backfill: the sealed rate
 of 0.39 from five months of overnight decays, the steady-state inversion above
-that put occupied hours near 1.05 ACH, and the window measurement below, which
-predates the backfill entirely.
+that put occupied hours near 1.05 ACH, and a window measurement that predates
+the backfill entirely.
 
 ## A second channel: four attempts, and why each failed
 
@@ -189,3 +189,24 @@ while holding activity fixed and varying sex and body mass across 55-95 kg spans
 L/h is consistent with twenty-one different combinations of sex, mass and
 activity. This is the same identifiability problem as `k` versus `N`, and no
 amount of extra data from this one sensor resolves it.
+
+## Overnight CO2 and the rest of the home
+
+With the door ajar the room does not relax toward outdoor air, it relaxes
+toward the air around it -- and a night when the room's asymptote settled
+higher than usual suggested that air was itself loaded by people sleeping
+elsewhere in the home. If so, the room's overnight level would be a proxy for
+how many people were in the building.
+
+It is not. Comparing two groups of nights the occupant describes as opposite
+extremes -- one where nobody is normally there, one where two people normally
+are -- the overnight level differs by 40 ppm with a Mann-Whitney p of 0.48, and
+the interquartile ranges overlap almost entirely. Thirteen nights against
+fourteen, and the sensor does not separate them.
+
+The overnight asymptote does vary a great deal, from under 400 to over 1100 ppm
+across the record, so something moves it. Whatever that is, it is not how many
+people are asleep in the building. This matters for the occupancy model because
+the asymptote is one of its inputs: it is genuinely variable, and no estimator
+conditioned on time of day can follow it.
+

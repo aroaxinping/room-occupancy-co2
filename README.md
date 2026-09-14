@@ -78,7 +78,7 @@ The interesting part. Each was assumed, then measured, then abandoned:
 | Temperature can see body heat | 100 W loses to a server rack's continuous load |
 | Temperature can see arrivals via air conditioning | The signal is real; the decoder gain is not established |
 | The rack's thermal delta measures ventilation | Correlation +0.07 across ten days of paired sensors |
-| Night CO2 reveals who is sleeping in the building | p = 0.48 across 27 labelled nights |
+| Overnight CO2 reflects how many people are elsewhere in the home | Two groups of nights differ by 40 ppm, p = 0.48 |
 
 And one methodological failure worth more than the rest: **the validation
 metric was reproducible by a calendar rule that reads no sensor at all**, which

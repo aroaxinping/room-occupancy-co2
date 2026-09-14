@@ -12,7 +12,7 @@ disk in plaintext and never enter the repository. To store them once:
 
 (the -w with no value prompts for the secret without echoing it to the shell
 history). A SwitchBot token grants control of every device on the account --
-locks and cameras included -- so it is treated as a high-value credential
+account-wide rather than scoped to one sensor -- so it is treated as a high-value credential
 rather than as project configuration.
 
 Run it from cron or a systemd timer every 5 minutes, matching the sensor's own
